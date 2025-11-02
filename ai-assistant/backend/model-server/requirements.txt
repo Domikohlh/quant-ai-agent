@@ -5,3 +5,8 @@ torch == 2.9.0
 accelerate == 1.11.0
 pydantic ==2.12.0
 python-multipart == 0.0.20
+bitsandbytes== 0.48.0
+pydantic-settings== 2.11.0
+python-dotenv== 1.1.1
+sentencepiece== 0.2.1
+protobuf== 6.33.0
