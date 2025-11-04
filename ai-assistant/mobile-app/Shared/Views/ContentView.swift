@@ -56,3 +56,19 @@ struct OfflineBanner: View {
         .foregroundColor(.white)
     }
 }
+
+// MARK: - Preview
+#Preview("Normal") {
+    ContentView()
+        .environmentObject(NetworkMonitor())
+        .environmentObject(AppState())
+}
+
+#Preview("Offline") {
+    let networkMonitor = NetworkMonitor()
+    networkMonitor.isConnected = false
+    
+    return ContentView()
+        .environmentObject(networkMonitor)
+        .environmentObject(AppState())
+}
