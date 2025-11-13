@@ -1,0 +1,182 @@
+version: '3.9'
+
+services:
+  postgres:
+    image: timescale/timescaledb:latest-pg15
+    container_name: quantai_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "${POSTGRES_PORT}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - quantai_network
+
+  redis:
+    image: redis:7-alpine
+    container_name: quantai_redis
+    command: redis-server --appendonly yes
+    ports:
+      - "${REDIS_PORT}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - quantai_network
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/api/Dockerfile
+    container_name: quantai_api
+    command: uvicorn backend.api.main:app --host 0.0.0.0 --port 8000 --reload
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - REDIS_URL=${REDIS_URL}
+      - MODEL_SERVER_URL=${MODEL_SERVER_URL}
+      - ENVIRONMENT=${ENVIRONMENT}
+    ports:
+      - "${API_PORT}:8000"
+    volumes:
+      - ./backend:/app/backend
+      - ./data:/app/data
+      - ./config:/app/config
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    networks:
+      - quantai_network
+
+  celery_worker:
+    build:
+      context: .
+      dockerfile: docker/api/Dockerfile
+    container_name: quantai_celery_worker
+    command: celery -A backend.core.celery_app worker --loglevel=info --concurrency=4
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND}
+    volumes:
+      - ./backend:/app/backend
+      - ./data:/app/data
+      - ./config:/app/config
+    depends_on:
+      - redis
+      - postgres
+      - api
+    env_file:
+      - .env
+    networks:
+      - quantai_network
+
+  celery_beat:
+    build:
+      context: .
+      dockerfile: docker/api/Dockerfile
+    container_name: quantai_celery_beat
+    command: celery -A backend.core.celery_app beat --loglevel=info
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND}
+    volumes:
+      - ./backend:/app/backend
+      - ./data:/app/data
+      - ./config:/app/config
+    depends_on:
+      - redis
+      - postgres
+    env_file:
+      - .env
+    networks:
+      - quantai_network
+
+  flower:
+    build:
+      context: .
+      dockerfile: docker/api/Dockerfile
+    container_name: quantai_flower
+    command: celery -A backend.core.celery_app flower --port=5555
+    ports:
+      - "5555:5555"
+    environment:
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND}
+    depends_on:
+      - redis
+      - celery_worker
+    env_file:
+      - .env
+    networks:
+      - quantai_network
+
+  chromadb:
+    image: chromadb/chroma:latest
+    container_name: quantai_chromadb
+    ports:
+      - "8001:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+    environment:
+      - IS_PERSISTENT=TRUE
+      - PERSIST_DIRECTORY=/chroma/chroma
+      - ANONYMIZED_TELEMETRY=FALSE
+    networks:
+      - quantai_network
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: quantai_prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - quantai_network
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: quantai_grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - quantai_network
+
+volumes:
+  postgres_data:
+  redis_data:
+  chroma_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  quantai_network:
+    driver: bridge

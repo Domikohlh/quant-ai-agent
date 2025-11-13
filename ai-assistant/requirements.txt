@@ -1,0 +1,90 @@
+# Core Framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+pydantic==2.5.3
+pydantic-settings==2.1.0
+
+# AI/ML
+torch==2.1.2
+transformers==4.36.2
+sentence-transformers==2.3.1
+accelerate==0.26.1
+bitsandbytes==0.41.3
+langchain==0.1.4
+langchain-community==0.0.16
+chromadb==0.4.22
+openai==1.10.0
+
+# Data Processing
+pandas==2.1.4
+numpy==1.26.3
+scipy==1.11.4
+scikit-learn==1.4.0
+ta-lib==0.4.28
+yfinance==0.2.35
+
+# Finance APIs
+alpaca-py==0.14.0
+ib_insync==0.9.86
+requests==2.31.0
+websockets==12.0
+
+# Database
+SQLAlchemy==2.0.43
+asyncpg==0.30.0
+psycopg2-binary==2.9.11
+alembic==1.17.0
+redis==7.0.0
+
+# Task Queue
+celery==5.5.3
+celery[redis]==5.5.3
+flower==2.0.1
+
+# Authentication & Security
+python-jose[cryptography]==3.5.0
+passlib[bcrypt]==1.7.4
+python-multipart==0.0.20
+cryptography==46.0.2
+
+# AWS (Require constant update) 
+boto3==1.40.70
+botocore==1.40.70
+
+# Monitoring & Logging
+structlog==25.5.0
+python-json-logger==4.0.0
+prometheus-client==0.23.1
+sentry-sdk==2.43.0
+
+# Testing
+pytest==9.0.0
+pytest-asyncio==1.3.0
+pytest-cov==7.0.0
+httpx==0.28.1
+faker==37.12.0
+
+# Utils
+python-dotenv==1.2.1
+aiofiles==25.1.0
+python-dateutil==2.9.0
+pytz==2025.2
+tenacity==9.1.2
+schedule==1.2.2
+
+# Backtesting
+backtrader==1.9.78.123
+vectorbt==0.28.1
+
+# Quantitative Finance
+empyrical==0.5.5
+
+# Development
+black==25.11.0
+flake8==7.3.0
+mypy==1.18.2
+pre-commit==4.4.0
+ipython==9.7.0
+
+# Additional dependencies
+huggingface-hub==1.1.2
