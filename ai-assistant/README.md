@@ -295,47 +295,47 @@ aws s3 sync data/models/ s3://your-bucket/models/
 | Aggressive Local Mode | 60% | ~$180/month |
 
 ## File Checklist
-# Core Configuration Files
+### Core Configuration Files
 
 ✅ requirements.txt - Python dependencies
 ✅ .env - Environment variables
 ✅ docker-compose.yml - Docker orchestration
 
-# Docker Files
+### Docker Files
 
 ✅ docker/api/Dockerfile - API server container
 ✅ docker/model/Dockerfile - Model server container (GPU)
 
-# Backend Core Files
+### Backend Core Files
 
 ✅ backend/core/database.py - Database configuration
 ✅ backend/core/cache.py - Redis cache (from artifacts)
 ✅ backend/core/config/settings.py - Settings management (from artifacts)
 
-# Model Files
+### Model Files
 
 ✅ backend/models/llm/manager.py - Model switching logic
 ✅ backend/models/llm/server.py - Model inference server (from artifacts)
 
-# Utility Files
+### Utility Files
 
 ✅ backend/utils/logging/logger.py - Logging system (from artifacts)
 
-# API Files
+### API Files
 
 ✅ backend/api/main.py - FastAPI application (from artifacts)
 
-# Scripts
+### Scripts
 
 ✅ scripts/init_project.sh - Project initialization (from artifacts)
 ✅ scripts/deployment/deploy_aws.sh - AWS deployment (from artifacts)
 ✅ scripts/deployment/download_models.py - Model download (from artifacts)
 
-# Infrastructure
+### Infrastructure
 
 ✅ infrastructure/terraform/main.tf - AWS infrastructure (from artifacts)
 
-# Documentation
+### Documentation
 
 ✅ README.md - Project documentation (from artifacts)
 ✅ GETTING_STARTED.md - Quick start guide (from artifacts)
