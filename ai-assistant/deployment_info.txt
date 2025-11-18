@@ -1,0 +1,19 @@
+Quant AI Test Deployment Information
+Generated: Tue 18 Nov 2025 16:24:40 HKT
+
+Test Instance:
+  IP: 35.172.203.14
+  ID: i-002595d9ba2e464c3
+  SSH: ssh -i ~/.ssh/id_rsa ubuntu@35.172.203.14
+
+
+
+S3 Bucket: quantai-test-57c8f704
+Cost: ~$0.01/hour (~$0.25/day - FREE TIER eligible)
+
+Stop Instances:
+  aws ec2 stop-instances --instance-ids i-002595d9ba2e464c3 
+
+Terminate (Delete Everything):
+  cd infrastructure/terraform
+  terraform destroy -var="your_ip=38.98.189.81/32" -var="enable_model_server=false"
