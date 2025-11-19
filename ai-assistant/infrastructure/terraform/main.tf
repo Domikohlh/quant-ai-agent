@@ -283,7 +283,7 @@ resource "aws_instance" "model_server" {
     volume_type = "gp3"
   }
   
-  user_data = file("${path.module}/scripts/model_server_init.sh")
+  user_data = data.local_file.model_server_init.content_base64
   
   tags = {
     Name        = "${var.project_name}-model-server"
@@ -306,7 +306,7 @@ resource "aws_instance" "api_server" {
     volume_type = "gp3"
   }
   
-  user_data = file("${path.module}/scripts/api_server_init.sh")
+  user_data = data.local_file.model_server_init.content_base64
   
   tags = {
     Name        = "${var.project_name}-api-server"
@@ -322,12 +322,17 @@ data "aws_ami" "deep_learning" {
   
   filter {
     name   = "name"
-    values = ["Deep Learning AMI GPU PyTorch *"]
+    values = ["Deep Learning OSS Nvidia Driver AMI GPU PyTorch * (Ubuntu 22.04)*"]
   }
   
   filter {
     name   = "virtualization-type"
     values = ["hvm"]
+  }
+  
+  filter {
+    name   = "architecture"
+    values = ["x86_64"]
   }
 }
 
@@ -337,7 +342,12 @@ data "aws_ami" "ubuntu" {
   
   filter {
     name   = "name"
-    values = ["ubuntu/images/hvm-ssd/ubuntu-22.04-amd64-server-*"]
+    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
+  }
+  
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
   }
 }
 
@@ -371,4 +381,13 @@ output "s3_bucket" {
 output "model_server_url" {
   value       = "http://${aws_instance.model_server.private_ip}:8001"
   description = "Model server URL (internal)"
+}
+
+# Read the init scripts relative to the Terraform module root (always correct)
+data "local_file" "model_server_init" {
+  filename = "${abspath(path.module)}/../../scripts/model_server_init.sh"
+}
+
+data "local_file" "api_server_init" {
+  filename = "${abspath(path.module)}/../../scripts/api_server_init.sh"
 }
