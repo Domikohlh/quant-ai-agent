@@ -1,5 +1,6 @@
 langgraph
-langchain-google-genai
+langchain-google-genai>=2.0.0
+google-auth
 langchain-core
 langchain-community
 ib_insync           # Python wrapper for IBKR
@@ -9,3 +10,6 @@ ta                  # Technical Analysis library
 pydantic
 google-cloud-logging
 mcp                 # Model Context Protocol SDK
+alpaca-py
+pandas_ta
+fredapi
