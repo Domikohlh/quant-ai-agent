@@ -1,0 +1,11 @@
+langgraph
+langchain-google-genai
+langchain-core
+langchain-community
+ib_insync           # Python wrapper for IBKR
+pandas
+numpy
+ta                  # Technical Analysis library
+pydantic
+google-cloud-logging
+mcp                 # Model Context Protocol SDK
