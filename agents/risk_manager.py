@@ -3,8 +3,9 @@ import os
 import google.auth
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.pydantic_v1 import BaseModel, Field
+from pydantic import BaseModel, Field
 from typing import List, Literal
+from langchain_core.messages import SystemMessage, HumanMessage
 
 from core.state import AgentState
 from tools.portfolio import get_current_portfolio
@@ -69,41 +70,41 @@ def risk_manager_node(state: AgentState):
         if candles:
             price_context[symbol] = candles[-1]['close']
 
-    system_prompt = (
-        "You are the Chief Risk Officer (CRO) of a hedge fund.\n"
-        "Your goal is CAPITAL PRESERVATION. You evaluate trade proposals from the Quant Analyst.\n\n"
-        "### PORTFOLIO CONSTRAINTS:\n"
-        "1. **Max Position Size**: No single position > 20% of Total Equity.\n"
-        "2. **Cash Buffer**: Maintain at least 5% cash reserve.\n"
-        "3. **Confidence Adjustment**: If Signal Confidence < 0.6, reduce suggested size by 50%.\n"
-        "4. **Short Selling**: WE DO NOT SHORT. If proposal is SELL, only sell what we currently own.\n\n"
-        "### INPUT DATA:\n"
-        f"Portfolio Equity: ${portfolio.get('total_equity', 0)}\n"
-        f"Cash Available: ${portfolio.get('cash', 0)}\n"
-        f"Current Holdings: {portfolio.get('holdings', {})}\n"
-        f"Market Prices: {price_context}\n\n"
-        "Task: Output a list of `approved_orders`. Calculate the exact `qty` (shares) based on the % weight requested."
+    system_text = (
+        "You are the Chief Risk Officer (CRO).\n"
+        "GOAL: Capital Preservation.\n\n"
+        "RULES:\n"
+        "1. Max Position: 20% of Equity.\n"
+        "2. Cash Buffer: 5%.\n"
+        "3. Confidence Check: If conf < 0.6, halve the size.\n"
+        "4. NO SHORTING.\n\n"
+        "DATA:\n"
+        f"Equity: ${portfolio.get('total_equity', 0)}\n"
+        f"Cash: ${portfolio.get('cash', 0)}\n"
+        f"Holdings: {str(portfolio.get('holdings', {}))}\n" # str() ensures it's text
+        f"Prices: {str(price_context)}\n\n" # str() ensures it's text
+        "OUTPUT: JSON with approved_orders."
     )
 
-    user_content = f"Trade Proposals to Review:\n{proposals}"
-
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        ("user", user_content)
-    ])
+# We skip the 'ChatPromptTemplate' wrapper to avoid variable parsing errors
+    messages = [
+        SystemMessage(content=system_text),
+        HumanMessage(content=f"Review these proposals: {str(proposals)}")
+    ]
 
     # 3. Generate Assessment
-    chain = prompt | llm.with_structured_output(RiskAssessment)
+    chain = llm.with_structured_output(RiskAssessment)
     
     try:
-        decision = chain.invoke({})
+        # Pass the message list directly
+        decision = chain.invoke(messages)
+        
+        # ... keep the rest of the print/return logic ...
         print(f"🛡️ RISK ASSESSMENT COMPLETE: {decision.portfolio_status}")
         print(f"   ✅ Approved: {len(decision.approved_orders)} orders")
         for o in decision.approved_orders:
             print(f"      - {o.side} {o.qty} {o.symbol} (Limit: {o.limit_price})")
-        print(f"   ❌ Rejected: {decision.rejected_orders}")
-
-        # 4. Return to State
+        
         return {
             "approved_orders": [order.dict() for order in decision.approved_orders],
             "messages": [state["messages"][-1]] 

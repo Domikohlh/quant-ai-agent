@@ -3,7 +3,7 @@ import os
 from typing import Literal
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.pydantic_v1 import BaseModel, Field
+from pydantic import BaseModel, Field
 from langchain_core.output_parsers import PydanticOutputParser
 import google.auth # Added for Vertex Auth
 
