@@ -14,3 +14,6 @@ credentials.json
 
 # IBKR
 ib_logs/
+
+# Virtual Environment
+*_env
