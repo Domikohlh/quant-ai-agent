@@ -12,7 +12,7 @@ from tools.execution import execution_tools, execute_order
 # 1. CONFIGURATION
 # ==========================================
 # Flash is sufficient for function calling
-MODEL_NAME = "gemini-2.0-flash-exp" 
+MODEL_NAME = "gemini-2.0-flash" 
 
 # ==========================================
 # 2. AGENT LOGIC

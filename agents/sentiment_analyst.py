@@ -5,7 +5,7 @@ import google.auth
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import ToolMessage, AIMessage
-from langchain_core.pydantic_v1 import BaseModel, Field
+from pydantic import BaseModel, Field
 
 from core.state import AgentState
 from tools.news_data import news_tools, fetch_financial_news
@@ -14,7 +14,7 @@ from tools.news_data import news_tools, fetch_financial_news
 # 1. CONFIGURATION
 # ==========================================
 # Gemini 3.0 Flash: High context, low cost, decent reasoning
-MODEL_NAME = "gemini-3.0-flash-001" 
+MODEL_NAME = "gemini-2.5-flash" 
 
 # ==========================================
 # 2. OUTPUT SCHEMA

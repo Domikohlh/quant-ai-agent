@@ -13,7 +13,7 @@ from core.state import AgentState
 # 1. CONFIGURATION
 # ==========================================
 # Using Flash for speed/cost. It's great at calling tools.
-MODEL_NAME = "gemini-2.0-flash-exp" # Or "gemini-1.5-flash" depending on availability
+MODEL_NAME = "gemini-2.0-flash" # Or "gemini-1.5-flash" depending on availability
 
 # ==========================================
 # 2. AGENT LOGIC
@@ -59,6 +59,7 @@ def data_engineer_node(state: AgentState):
     prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
         MessagesPlaceholder(variable_name="messages"),
+        ("human", "Check the required data status and call tools if needed.")
     ])
 
     chain = prompt | llm

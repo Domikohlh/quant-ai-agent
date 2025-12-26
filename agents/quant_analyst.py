@@ -3,7 +3,7 @@ import os
 import google.auth
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.pydantic_v1 import BaseModel, Field
+from pydantic import BaseModel, Field
 from typing import Literal, Optional
 
 from core.state import AgentState
@@ -13,7 +13,7 @@ from tools.technical_analysis import calculate_technicals
 # 1. CONFIGURATION
 # ==========================================
 # Gemini 3.0 Pro: We need top-tier reasoning to synthesize signals
-MODEL_NAME = "gemini-3.0-pro-001" 
+MODEL_NAME = "gemini-2.5-pro" 
 
 # ==========================================
 # 2. OUTPUT SCHEMA
@@ -56,13 +56,22 @@ def quant_analyst_node(state: AgentState):
     stocks_raw = market_data.get("stocks", {})
     sentiment_scores = sentiment_data.get("scores", {})
     
-    # 2. Python-Side Calculation (The "Math Tool")
-    # We do this HERE to feed the *results* to the LLM, not the raw CSV
     technicals_summary = []
     
     for symbol, candles in stocks_raw.items():
         # Run TA tool
         tech_data = calculate_technicals(symbol, candles)
+        
+        # --- FIX START: ERROR HANDLING ---
+        # If TA failed (e.g. not enough data), skip this symbol
+        if "error" in tech_data:
+            print(f"⚠️ SKIPPING {symbol}: {tech_data['error']}")
+            continue
+            
+        # Double check RSI exists (validity check)
+        if tech_data.get("RSI") is None:
+            print(f"⚠️ SKIPPING {symbol}: Incomplete indicators.")
+            continue
         
         # Combine with Sentiment
         s_score = sentiment_scores.get(symbol, 0.0)

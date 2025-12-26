@@ -5,7 +5,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 from typing import List, Literal
-from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 
 from core.state import AgentState
 from tools.portfolio import get_current_portfolio
@@ -13,7 +13,7 @@ from tools.portfolio import get_current_portfolio
 # ==========================================
 # 1. CONFIGURATION
 # ==========================================
-MODEL_NAME = "gemini-3.0-pro-001" 
+MODEL_NAME = "gemini-2.5-pro" 
 
 # ==========================================
 # 2. OUTPUT SCHEMA
@@ -105,9 +105,18 @@ def risk_manager_node(state: AgentState):
         for o in decision.approved_orders:
             print(f"      - {o.side} {o.qty} {o.symbol} (Limit: {o.limit_price})")
         
+        # Handle message history safely
+        result_messages = []
+        
+        if state.get("messages") and len(state["messages"]) > 0:
+            result_messages = [state["messages"][-1]]
+        else:
+            # If history is empty, create a new log message
+            result_messages = [AIMessage(content=f"Risk check complete. Approved: {len(decision.approved_orders)}")]
+
         return {
             "approved_orders": [order.dict() for order in decision.approved_orders],
-            "messages": [state["messages"][-1]] 
+            "messages": result_messages
         }
 
     except Exception as e:
