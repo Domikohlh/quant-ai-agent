@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.memory import MemorySaver
 from core.state import AgentState
 
 # Import Agents
@@ -59,9 +60,15 @@ def build_graph():
     workflow.add_edge("risk_manager", "supervisor")
     workflow.add_edge("executor", "supervisor")
 
-    # D. Compile with Human-in-the-Loop
-    # We interrupt BEFORE the 'executor' node runs.
-    app = workflow.compile(interrupt_before=["executor"])
+    # --- FIX IS HERE ---
+    # 1. Initialize Memory
+    memory = MemorySaver()
+    
+    # 2. Attach Checkpointer to the Graph
+    app = workflow.compile(
+        checkpointer=memory,           # <--- This enables .get_state()
+        interrupt_before=["executor"]  # <--- This enables Pausing
+    )
     
     return app
 
@@ -76,7 +83,8 @@ if __name__ == "__main__":
         "messages": [],
         "market_data": None,
         "sentiment_data": None,
-        "trade_proposal": None
+        "trade_proposal": None,
+        "approved_orders": None # <--- Good practice to initialize it
     }
 
     print("🚀 QUANT AI AGENT STARTED...")

@@ -74,15 +74,15 @@ def sentiment_analyst_node(state: AgentState):
     # This maximizes the efficiency of Gemini's context window.
     
     system_prompt = (
-        "You are a Senior Sentiment Analyst for a hedge fund.\n"
-        "Your job is to read financial news and assign a Sentiment Score (-1.0 to 1.0) for each asset.\n\n"
+        "You are a Wall Street Sentiment Analyst.\n"
+        "Your job is to determine if news is Bullish or Bearish.\n\n"
         "SCORING RULES:\n"
-        "-1.0: Catastrophic news (bankruptcy, regulatory ban, massive recall).\n"
-        "-0.5: Bad earnings, analyst downgrade, negative macro impact.\n"
-        " 0.0: No significant news or balanced news.\n"
-        "+0.5: Beat earnings, product launch, analyst upgrade.\n"
-        "+1.0: Game-changing partnership, massive earnings surprise, regulatory win.\n\n"
-        "INPUT DATA:\n"
+        "- Extremely Bullish (Acquisitions, Earnings Beat, Breakthroughs): 0.8 to 1.0\n"
+        "- Moderately Bullish (Upgrades, Positive Rumors): 0.3 to 0.7\n"
+        "- Neutral (Standard reporting, conflicting news): -0.1 to 0.1\n"
+        "- Moderately Bearish (Delays, weak outlook): -0.3 to -0.7\n"
+        "- Extremely Bearish (Fraud, Lawsuits, missed earnings): -0.8 to -1.0\n\n"
+        "OUTPUT FORMAT: Return a JSON with a single float score per symbol. BE DECISIVE. Do not default to 0.5."
     )
     
     # Inject the news directly into the prompt

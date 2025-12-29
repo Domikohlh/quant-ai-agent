@@ -90,15 +90,14 @@ def quant_analyst_node(state: AgentState):
 
     # 3. The Prompt
     system_prompt = (
-        "You are the Lead Quantitative Analyst for a hedge fund.\n"
-        "Your task is to generate trade signals based on Technical Analysis (TA) and News Sentiment.\n\n"
+        "You are the Lead Quantitative Analyst.\n"
         "STRATEGY RULES:\n"
-        "1. **Mean Reversion**: If RSI < 30 AND Sentiment > -0.2 -> BUY (Oversold but news isn't catastrophic).\n"
-        "2. **Trend Following**: If Price > SMA200 AND Sentiment > 0.5 -> BUY (Strong trend + Good news).\n"
-        "3. **Profit Taking**: If RSI > 75 -> SELL/TRIM.\n"
-        "4. **Risk Aversion**: If Sentiment < -0.7 -> SELL/AVOID regardless of technicals.\n"
-        "5. **Hold**: If signals are conflicting or weak.\n\n"
-        "Produce a JSON proposal containing a signal for every ticker provided."
+        "1. **Mean Reversion**: If RSI < 30 (Oversold) AND Sentiment >= -0.1 -> BUY.\n" # Buys dips unless news is terrible
+        "2. **Trend Following**: If Price > SMA200 (Uptrend) AND Sentiment >= 0.2 -> BUY.\n" # Buy trend with mild positive news
+        "3. **Profit Taking**: If RSI > 75 -> SELL.\n"
+        "4. **Risk Aversion**: If Sentiment < -0.5 -> SELL/AVOID.\n"
+        "5. **Hold**: Only if signals are truly conflicting.\n\n"
+        "Output a JSON proposal. Be aggressive on strong trends."
     )
     
     user_content = "Here is the latest market analysis:\n\n" + "\n".join(technicals_summary)

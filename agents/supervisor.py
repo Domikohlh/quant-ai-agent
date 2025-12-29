@@ -54,6 +54,13 @@ def supervisor_node(state: AgentState):
     trade_proposal = state.get("trade_proposal")
     approved_orders = state.get("approved_orders")
     
+    # Debug Print (Optional but helpful)
+    print(f"DEBUG SUPERVISOR: approved_orders type: {type(approved_orders)} value: {approved_orders}")
+
+    # --- FIX: ROBUST CHECK ---
+    # We check if the key exists in the dictionary explicitly, not just the value
+    risk_checked = "YES" if "approved_orders" in state and state["approved_orders"] is not None else "NO"
+    
     # --- 3. DETERMINE FLAGS ---
     # Check if we actually have stock data (not just an empty dict)
     stocks_present = bool(market_data.get("stocks"))
@@ -88,7 +95,7 @@ def supervisor_node(state: AgentState):
         "2. If Sentiment is 'NO' -> Route to 'sentiment_analyst'.\n"
         "3. If Proposal is 'NO' -> Route to 'quant_analyst'.\n"
         "4. If Risk Check is 'NO' -> Route to 'risk_manager'.\n"
-        "5. If Risk Check is 'YES' -> Route to 'executor'.\n"
+        "5. If Risk Check is 'YES' (even if 0 orders approved) -> Route to 'executor'.\n"
         "6. If Executor has finished (check message history) -> 'FINISH'.\n"
     )
 
