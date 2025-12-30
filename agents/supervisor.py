@@ -55,7 +55,7 @@ def supervisor_node(state: AgentState):
     approved_orders = state.get("approved_orders")
     
     # Debug Print (Optional but helpful)
-    print(f"DEBUG SUPERVISOR: approved_orders type: {type(approved_orders)} value: {approved_orders}")
+    #print(f"DEBUG SUPERVISOR: approved_orders type: {type(approved_orders)} value: {approved_orders}")
 
     # --- FIX: ROBUST CHECK ---
     # We check if the key exists in the dictionary explicitly, not just the value

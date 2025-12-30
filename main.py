@@ -11,6 +11,8 @@ from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 from core.state import AgentState
 
+from tools.portfolio import print_portfolio_dashboard
+
 # Import Agents
 from agents.supervisor import supervisor_node
 from agents.data_engineer import data_engineer_node
@@ -101,27 +103,40 @@ if __name__ == "__main__":
     # 2. Inspect State at Interruption
     snapshot = app.get_state(thread)
     if snapshot.next and snapshot.next[0] == "executor":
-        print("\n⏸️  PAUSED FOR HUMAN APPROVAL")
         
-        # Show what is pending
-        current_values = snapshot.values
-        orders = current_values.get("approved_orders", [])
+        # --- VISUALIZATION STARTS HERE ---
+        # A. Show the Portfolio Book
+        print_portfolio_dashboard()
         
-        if not orders:
-            print("No orders to execute. Process finished.")
-            sys.exit(0)
-            
-        print(f"💰 PENDING ORDERS: {len(orders)}")
-        for o in orders:
-            print(f"   - {o['side']} {o['qty']} {o['symbol']}")
-            
-        # 3. Ask for Permission
-        user_input = input("\n✅ Do you approve execution? (yes/no): ")
-        
-        if user_input.lower() == "yes":
-            print("🚀 RESUMING EXECUTION...")
-            # Resume the graph - passing None as input simply continues execution
-            for event in app.stream(None, thread):
-                print(f"   -> Node: {event}")
+        # B. Show the Proposed Trade (from State)
+        approved_orders = snapshot.values.get("approved_orders", [])
+        print("📋 PENDING ORDERS FOR APPROVAL:")
+        if approved_orders:
+            for o in approved_orders:
+                print(f"   👉 {o['side']} {o['qty']} {o['symbol']} @ Market")
         else:
-            print("🛑 EXECUTION ABORTED BY USER.")
+            print("   (No orders generated - Strategy matched HOLD)")
+
+        print("\n" + "-"*30)
+        # --- VISUALIZATION ENDS HERE ---
+
+        # 3. Human Decision
+        user_input = input("✅ Do you approve execution? (yes/no): ").lower()
+        
+        if user_input == "yes":
+            # Resume execution
+            print("⚡ EXECUTION APPROVED. RESUMING...")
+            # We use Command(resume=None) just to unpause the graph
+            # (Use 'None' unless you want to change the state values)
+            from langgraph.types import Command # Ensure Command is imported
+            
+            # Note: For simple unpausing in LangGraph, you often just run it again
+            # But the correct modern way is often passing the input as a Config or updating state.
+            # However, since 'executor' doesn't take user input directly in our node definition,
+            # we can simply continue the stream.
+            
+            # Simple Continue:
+            for event in app.stream(None, thread):
+                pass
+        else:
+            print("🛑 EXECUTION REJECTED. SYSTEM SHUTDOWN.")
