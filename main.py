@@ -73,6 +73,28 @@ def build_graph():
     )
     
     return app
+    
+def print_trade_deal_sheet(approved_orders):
+    """Prints a detailed 'Deal Sheet' for the Human Executive."""
+    if not approved_orders:
+        print("   (No orders generated - Strategy matched HOLD)")
+        return
+
+    print(f"\n📋 PROPOSED TRADE DEALS ({len(approved_orders)})")
+    print("="*60)
+    
+    for i, o in enumerate(approved_orders, 1):
+        # Calculate approximate deal size
+        # (Assuming you might not have price here, but if you do, use it)
+        action_icon = "🟢" if o['side'] == "BUY" else "🔴"
+        
+        print(f"{i}. {action_icon} {o['side']} {o['symbol']}")
+        print(f"   ├─ Quantity:  {o['qty']}")
+        print(f"   ├─ Rationale: {o.get('reasoning', 'N/A')}")
+        print(f"   ├─ Return:    {o.get('expected_return', 'N/A')}")
+        print(f"   ├─ Risk:      {o.get('risk_analysis', 'N/A')}")
+        print(f"   └─ Stop Loss: {o.get('stop_loss', 'N/A')}")
+        print("-" * 60)
 
 # ==========================================
 # 2. RUNTIME LOGIC
@@ -110,6 +132,7 @@ if __name__ == "__main__":
         
         # B. Show the Proposed Trade (from State)
         approved_orders = snapshot.values.get("approved_orders", [])
+        print_trade_deal_sheet(approved_orders)
         print("📋 PENDING ORDERS FOR APPROVAL:")
         if approved_orders:
             for o in approved_orders:

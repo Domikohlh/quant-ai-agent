@@ -1,63 +1,62 @@
 # tools/market_data.py
 import os
-from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest
-from alpaca.data.timeframe import TimeFrame
+import yfinance as yf
 from fredapi import Fred
 import pandas as pd
-from datetime import datetime, timedelta
 import ssl
 import certifi
 
-# Global SSL Context Fix
+# Global SSL Context Fix (Crucial for Mac/Local environments)
 ssl._create_default_https_context = ssl._create_unverified_context
 
 # Initialize Clients
-alpaca_client = StockHistoricalDataClient(
-    os.getenv("ALPACA_API_KEY"),
-    os.getenv("ALPACA_SECRET_KEY")
-)
+# Note: Alpaca client removed. yfinance does not need authentication.
 fred = Fred(api_key=os.getenv("FRED_API_KEY"))
 
-def fetch_market_data(symbols: list[str], days: int = 365) -> dict:
+def fetch_market_data(symbols: list[str], period: str = "1mo", interval: str = "1h") -> dict:
     """
-    Fetches OHLCV data. 
-    ADJUSTMENT: Applies a 20-minute lag to support Alpaca Free Plan.
+    Fetches OHLCV data using Yahoo Finance.
+    Arguments:
+        symbols: List of tickers.
+        period: Data duration ("1d", "5d", "1mo", "1y", "max").
+        interval: Bar size ("1m", "5m", "15m", "1h", "1d").
     """
-    print(f"📉 FETCHING ALPACA DATA FOR: {symbols}")
+    print(f"📉 FETCHING YFINANCE DATA FOR: {symbols} (Interval: {interval})")
     
-    # --- FIX IS HERE ---
-    # Free Plan Data is delayed by 15 mins.
-    # We subtract 20 mins to be safe and avoid the "SIP data" error.
-    end_time = datetime.now() - timedelta(days=1)
-    start_time = end_time - timedelta(days=days)
-
-    try:
-        request_params = StockBarsRequest(
-            symbol_or_symbols=symbols,
-            timeframe=TimeFrame.Day,
-            start=start_time,
-            end=end_time
-        )
-
-        bars = alpaca_client.get_stock_bars(request_params)
-        
-        # Convert to Dictionary
-        market_data = {}
-        for symbol in symbols:
-            # Check if we actually got data for this symbol
-            if symbol in bars.df.index:
-                df = bars.df.loc[symbol]
-                market_data[symbol] = df.reset_index().to_dict(orient="records")
-            else:
+    market_data = {}
+    
+    # We iterate to handle each symbol safely and normalize headers
+    for symbol in symbols:
+        try:
+            ticker = yf.Ticker(symbol)
+            # Fetch history
+            # auto_adjust=True fixes splits/dividends in one go
+            hist = ticker.history(period=period, interval=interval, auto_adjust=True)
+            
+            if hist.empty:
                 print(f"⚠️ Warning: No data found for {symbol}")
                 market_data[symbol] = []
-            
-        return market_data
+                continue
 
-    except Exception as e:
-        print(f"❌ ALPACA DATA ERROR: {e}")
-        return {}
+            # --- NORMALIZATION STEP ---
+            # 1. Reset Index to make Date/Datetime a column
+            hist = hist.reset_index()
+            
+            # 2. Lowercase column names for compatibility with Technical Analysis tools
+            # (Converts 'Date', 'Open', 'Close' -> 'date', 'open', 'close')
+            hist.columns = [c.lower() for c in hist.columns]
+            
+            # 3. Rename specific time column if needed (yfinance uses 'date' or 'datetime')
+            # Ensure we have a consistent time key if needed, but 'date' is standard.
+            
+            # Convert to list of dictionaries
+            market_data[symbol] = hist.to_dict(orient="records")
+            
+        except Exception as e:
+            print(f"❌ ERROR fetching {symbol}: {e}")
+            market_data[symbol] = []
+
+    return market_data
 
 def fetch_macro_data() -> dict:
     """
@@ -68,7 +67,7 @@ def fetch_macro_data() -> dict:
         # VIXCLS = CBOE Volatility Index
         vix_series = fred.get_series('VIXCLS', limit=10)
         
-        # Handle case where FRED returns NaN for the very last day (common)
+        # Handle case where FRED returns NaN for the very last day
         vix = vix_series.dropna().iloc[-1] if not vix_series.empty else 20.0
         
         return {
@@ -79,4 +78,5 @@ def fetch_macro_data() -> dict:
         print(f"⚠️ FRED ERROR: {e}")
         return {"VIX": 0.0, "ERROR": str(e)}
 
+# Export tools
 data_tools = [fetch_market_data, fetch_macro_data]

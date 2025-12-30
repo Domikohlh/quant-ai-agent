@@ -13,3 +13,5 @@ mcp                 # Model Context Protocol SDK
 alpaca-py
 pandas_ta
 fredapi
+yfinance
+lxml
