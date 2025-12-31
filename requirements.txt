@@ -14,4 +14,3 @@ alpaca-py
 pandas_ta
 fredapi
 yfinance
-lxml

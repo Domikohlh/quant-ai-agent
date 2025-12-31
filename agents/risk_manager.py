@@ -7,6 +7,7 @@ from typing import List, Literal
 
 from core.state import AgentState
 from tools.portfolio import get_current_portfolio
+from tools.trade_memory import log_decision
 
 # Use the smart model for complex risk reasoning
 MODEL_NAME = "gemini-2.5-pro"
@@ -38,7 +39,7 @@ def risk_manager_node(state: AgentState):
     """
     The Risk Manager (Conscience).
     Validates proposals against portfolio limits and safety rules.
-    Enriches orders with rationale for the human trader.
+    Enriches orders with rationale for the human trader and logs rejections.
     """
     
     # --- 1. SETUP ---
@@ -109,9 +110,13 @@ def risk_manager_node(state: AgentState):
         proposal_map = {p['symbol']: p for p in proposals}
         
         final_orders = []
+        approved_symbols = set()
+
         for order in decision.approved_orders:
             original = proposal_map.get(order.symbol)
             if original:
+                approved_symbols.add(order.symbol)
+                
                 # Convert Pydantic model to dict
                 order_dict = order.model_dump()
                 
@@ -124,13 +129,27 @@ def risk_manager_node(state: AgentState):
                 
                 final_orders.append(order_dict)
 
+        # --- 7. LOG REJECTIONS TO MEMORY (RIGOROUSNESS) ---
+        # Identify which proposals were rejected so the Quant agent learns
+        proposed_symbols = set(proposal_map.keys())
+        rejected_symbols = proposed_symbols - approved_symbols
+        
+        for sym in rejected_symbols:
+            log_decision(
+                symbol=sym,
+                action="BUY", # Assuming Long-only logic for rejection context
+                outcome="REJECTED_RISK",
+                reasoning=f"Risk Manager blocked trade. Portfolio Status: {decision.portfolio_status}",
+                strategy="Risk Compliance"
+            )
+
         # Logging
         print(f"🛡️ RISK ASSESSMENT COMPLETE: {decision.portfolio_status}")
         print(f"   ✅ Approved: {len(final_orders)} orders")
         for o in final_orders:
             print(f"      - {o['side']} {o['qty']} {o['symbol']} (Reason: {o['reasoning'][:30]}...)")
         
-        # --- 7. RETURN STATE ---
+        # --- 8. RETURN STATE ---
         # Handle message history safely
         result_messages = []
         if state.get("messages") and len(state["messages"]) > 0:

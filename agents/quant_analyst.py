@@ -9,6 +9,7 @@ from typing import Literal, Optional
 
 from core.state import AgentState
 from tools.technical_analysis import calculate_technicals
+from tools.trade_memory import fetch_recent_memory
 
 # ==========================================
 # 1. CONFIGURATION
@@ -70,6 +71,12 @@ def quant_analyst_node(state: AgentState):
             
         s_score = sentiment_scores.get(symbol, 0.0)
         
+        # --- NEW: MEMORY CHECK ---
+        past_decisions = fetch_recent_memory(symbol)
+        memory_context = ""
+        if past_decisions:
+            memory_context = f"PAST 7 DAYS HISTORY: {'; '.join(past_decisions)}"
+        
         summary = (
             f"TICKER: {symbol}\n"
             f"Price: {tech_data.get('current_price')}\n"
@@ -77,6 +84,7 @@ def quant_analyst_node(state: AgentState):
             f"Trend: {tech_data.get('trend')} (Price vs SMA200)\n"
             f"Bands: Lower={tech_data.get('BB_LOWER'):.2f}, Upper={tech_data.get('BB_UPPER'):.2f}\n"
             f"Sentiment: {s_score}\n"
+            f"{memory_context}\n"
             "---"
         )
         technicals_summary.append(summary)
@@ -84,6 +92,7 @@ def quant_analyst_node(state: AgentState):
     if not technicals_summary:
         return {"trade_proposal": [], "messages": []}
 
+    
     # --- 2. UPDATED SYSTEM PROMPT ---
     system_prompt = (
         "You are a Lead Quantitative Analyst.\n"
@@ -97,6 +106,10 @@ def quant_analyst_node(state: AgentState):
         "- 'risk_analysis': Identify the main threat (e.g. 'Overbought RSI', 'Negative News').\n"
         "- 'expected_return': Estimate a % upside based on the Bands/SMA levels provided.\n"
         "- 'stop_loss': Suggest a stop level below key support (SMA200 or BB_LOWER).\n"
+        "MEMORY RULES:\n"
+        "1. If a stock was 'REJECTED_RISK' recently due to 'High Concentration' or 'Sector Exposure', DO NOT propose it again immediately.\n"
+        "2. If a stock was 'EXECUTED' recently, only propose adding if the trend is still strong (Pyramiding).\n"
+        "3. Explicitly mention in 'reasoning' if you are ignoring a past rejection due to new data.\n"
     )
 
     prompt = ChatPromptTemplate.from_messages([
