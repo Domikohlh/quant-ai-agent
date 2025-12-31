@@ -20,6 +20,7 @@ from agents.sentiment_analyst import sentiment_analyst_node
 from agents.quant_analyst import quant_analyst_node
 from agents.risk_manager import risk_manager_node
 from agents.executor import executor_node
+from agents.portfolio_manager import portfolio_manager_node
 
 # ==========================================
 # 1. BUILD THE GRAPH
@@ -30,6 +31,7 @@ def build_graph():
     # A. Add Nodes
     workflow.add_node("supervisor", supervisor_node)
     workflow.add_node("data_engineer", data_engineer_node)
+    workflow.add_node("portfolio_manager", portfolio_manager_node)
     workflow.add_node("sentiment_analyst", sentiment_analyst_node)
     workflow.add_node("quant_analyst", quant_analyst_node)
     workflow.add_node("risk_manager", risk_manager_node)
@@ -56,7 +58,8 @@ def build_graph():
 
     # C. Return Edges
     # After work is done, always report back to Supervisor
-    workflow.add_edge("data_engineer", "supervisor")
+    workflow.add_edge("data_engineer", "portfolio_manager")
+    workflow.add_edge("portfolio_manager", "supervisor")
     workflow.add_edge("sentiment_analyst", "supervisor")
     workflow.add_edge("quant_analyst", "supervisor")
     workflow.add_edge("risk_manager", "supervisor")
@@ -129,6 +132,18 @@ if __name__ == "__main__":
         # --- VISUALIZATION STARTS HERE ---
         # A. Show the Portfolio Book
         print_portfolio_dashboard()
+        
+        # Show Portfolio health
+        p_data = snapshot.values.get("portfolio_data", {})
+        if p_data:
+            print("\n🏥 PORTFOLIO HEALTH CARD")
+            print("-" * 30)
+            print(f"   ❤️  HHI Score:    {p_data.get('hhi_score')} ({p_data.get('concentration_risk')})")
+            print(f"   📊 Beta:         {p_data.get('portfolio_beta')}")
+            print(f"   🍰 Top Sector:   {max(p_data.get('sector_allocation', {'None':0}), key=p_data.get('sector_allocation', {'None':0}).get)}")
+            print("-" * 30)
+            print(f"   📣 Mandate:      {snapshot.values.get('strategy_mandate')}")
+            print("=" * 60)
         
         # B. Show the Proposed Trade (from State)
         approved_orders = snapshot.values.get("approved_orders", [])
