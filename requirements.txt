@@ -5,6 +5,7 @@ langchain-core
 langchain-community
 ib_insync           # Python wrapper for IBKR
 pandas
+pandas_market_calendars
 numpy
 ta                  # Technical Analysis library
 pydantic
@@ -14,3 +15,4 @@ alpaca-py
 pandas_ta
 fredapi
 yfinance
+pytz 
