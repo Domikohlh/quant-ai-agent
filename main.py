@@ -78,26 +78,53 @@ def build_graph():
     return app
     
 def print_trade_deal_sheet(approved_orders):
-    """Prints a detailed 'Deal Sheet' for the Human Executive."""
+    """
+    Visualizes the Deal Sheet.
+    Separates ACTIVE TRADES from PORTFOLIO HOLDS.
+    """
     if not approved_orders:
-        print("   (No orders generated - Strategy matched HOLD)")
+        print("   (No orders generated)")
         return
 
-    print(f"\n📋 PROPOSED TRADE DEALS ({len(approved_orders)})")
+    # Split orders
+    active_trades = [o for o in approved_orders if o['side'] in ["BUY", "SELL"]]
+    holds = [o for o in approved_orders if o['side'] == "HOLD"]
+
+    print("\n" + "="*60)
+    print(f"📋 STRATEGIC TRADING PLAN")
     print("="*60)
     
-    for i, o in enumerate(approved_orders, 1):
-        # Calculate approximate deal size
-        # (Assuming you might not have price here, but if you do, use it)
-        action_icon = "🟢" if o['side'] == "BUY" else "🔴"
-        
-        print(f"{i}. {action_icon} {o['side']} {o['symbol']}")
-        print(f"   ├─ Quantity:  {o['qty']}")
-        print(f"   ├─ Rationale: {o.get('reasoning', 'N/A')}")
-        print(f"   ├─ Return:    {o.get('expected_return', 'N/A')}")
-        print(f"   ├─ Risk:      {o.get('risk_analysis', 'N/A')}")
-        print(f"   └─ Stop Loss: {o.get('stop_loss', 'N/A')}")
+    # 1. ACTIVE TRADES SECTION
+    if active_trades:
+        print(f"\n🚀 PROPOSED EXECUTION (Number of proposed trades: {len(active_trades)})")
         print("-" * 60)
+        for i, o in enumerate(active_trades, 1):
+            icon = "🟢" if o['side'] == "BUY" else "🔴"
+            price = o.get('current_price', 0.0)
+            
+            print(f"{i}. {icon} {o['side']} {o['symbol']} @ ${price:,.2f}")
+            print(f"   ├─ Qty:       {o['qty']}")
+            print(f"   ├─ Rationale: {o.get('reasoning', 'N/A')}")
+            print(f"   ├─ Return:    {o.get('expected_return', 'N/A')}")
+            print(f"   └─ Risk:      {o.get('risk_analysis', 'N/A')}")
+            print("-" * 60)
+    else:
+        print("\n🚀 PROPOSED EXECUTION: NONE (Market conditions neutral)")
+
+    # 2. HOLDINGS REVIEW SECTION
+    if holds:
+        print(f"\n💼 PORTFOLIO REVIEW (Number of current holdings: {len(holds)})")
+        print("-" * 60)
+        for i, o in enumerate(holds, 1):
+            price = o.get('current_price', 0.0)
+            
+            print(f"{i}. 🟡 HOLD {o['symbol']} (Price: ${price:,.2f})")
+            print(f"   ├─ Rationale: {o.get('reasoning', 'N/A')}")
+            print(f"   ├─ Key Level: Stop Loss at {o.get('stop_loss', 'N/A')}")
+            print(f"   └─ Verdict:   {o.get('risk_analysis', 'Stable')}")
+            print("-" * 60)
+    
+    print("="*60 + "\n")
 
 # ==========================================
 # 2. RUNTIME LOGIC

@@ -9,40 +9,34 @@ from core.state import AgentState
 from tools.portfolio import get_current_portfolio
 from tools.trade_memory import log_decision
 
-# Use the smart model for complex risk reasoning
 MODEL_NAME = "gemini-2.5-pro"
 
-# ==========================================
-# 1. OUTPUT SCHEMAS
-# ==========================================
+# --- OUTPUT SCHEMA ---
 class Order(BaseModel):
     symbol: str
     qty: float
-    side: Literal["BUY", "SELL"]
+    # FIX: Add "HOLD" to allowed sides
+    side: Literal["BUY", "SELL", "HOLD"]
     limit_price: float = Field(description="Use 0.0 for Market Orders")
+    current_price: float = Field(description="Price at time of decision")
     
-    # New Fields for HITL Rationale (Pass-through)
-    reasoning: str = Field(description="Brief justification for the trade")
+    # Rationale Fields
+    reasoning: str = Field(description="Brief justification for the trade/hold")
     risk_analysis: str = Field(description="Primary downside risk identified")
     expected_return: str = Field(description="Conservative upside target")
     stop_loss: str = Field(description="Invalidation level")
 
 class RiskAssessment(BaseModel):
-    portfolio_status: str = Field(description="Summary of risk check (e.g. 'Safe', 'Over-leveraged')")
-    approved_orders: List[Order] = Field(description="List of orders that passed risk checks")
+    portfolio_status: str = Field(description="Summary of risk check")
+    approved_orders: List[Order] = Field(description="List of orders (and verified holds)")
     rejected_orders: List[str] = Field(description="List of rejected symbols")
 
-# ==========================================
-# 2. AGENT LOGIC
-# ==========================================
 def risk_manager_node(state: AgentState):
     """
-    The Risk Manager (Conscience).
-    Validates proposals against portfolio limits and safety rules.
-    Enriches orders with rationale for the human trader and logs rejections.
+    The Risk Manager.
+    Validates BUY/SELLs.
+    Verifies HOLDs (Pass-through with risk check).
     """
-    
-    # --- 1. SETUP ---
     credentials, project_id = google.auth.default()
     llm = ChatGoogleGenerativeAI(
         model=MODEL_NAME,
@@ -51,122 +45,69 @@ def risk_manager_node(state: AgentState):
         temperature=0
     )
 
-    # --- 2. GET CONTEXT ---
+    # Load Context
     portfolio = get_current_portfolio()
     proposals = state.get("trade_proposal", [])
     market_data = state.get("market_data", {}).get("stocks", {})
 
-    # If no proposals, nothing to check
     if not proposals:
-        return {
-            "approved_orders": [],
-            "messages": [AIMessage(content="Risk Manager: No trades to review.")]
-        }
+        return {"approved_orders": [], "messages": [AIMessage(content="No proposals.")]}
 
-    # --- 3. PREPARE DATA FOR LLM ---
-    # Create a simplified price context for the LLM
-    price_context = {}
-    for symbol, candles in market_data.items():
-        if candles:
-            price_context[symbol] = candles[-1]['close']
+    # Price Context
+    price_context = {s: c[-1]['close'] for s, c in market_data.items() if c}
 
-    # --- 4. SYSTEM PROMPT ---
+    # --- UPDATED SYSTEM PROMPT ---
     system_text = (
         "You are the Chief Risk Officer (CRO).\n"
-        "GOAL: Capital Preservation and Strict Compliance.\n\n"
+        "GOAL: Capital Preservation and Portfolio Health.\n\n"
         "RULES:\n"
-        "1. Max Position Size: 20% of Total Equity per asset.\n"
-        "2. Cash Buffer: Maintain at least 5% cash after trades.\n"
-        "3. Confidence Check: If confidence < 0.6, cut quantity by 50%.\n"
-        "4. NO SHORT SELLING (Long Only).\n\n"
+        "1. MAX SIZE: 20% of Equity per asset.\n"
+        "2. CASH BUFFER: Keep 5% cash available.\n"
+        "3. HOLD SIGNALS: Approve 'HOLD' recommendations if the asset is not dangerously concentrated (>25% of portfolio).\n"
+        "   - For HOLDs, set 'qty' to 0 (or the current holding amount if known).\n"
+        "4. NO SHORT SELLING.\n\n"
         "DATA:\n"
         f"Equity: ${portfolio.get('total_equity', 0)}\n"
-        f"Cash: ${portfolio.get('cash', 0)}\n"
-        f"Current Holdings: {str(portfolio.get('holdings', []))}\n"
-        f"Market Prices: {str(price_context)}\n\n"
+        f"Holdings: {str(portfolio.get('holdings', []))}\n"
         "INSTRUCTIONS:\n"
-        "- Review the 'Trade Proposals' below.\n"
-        "- Calculate cost (Qty * Price) vs Equity.\n"
-        "- Output the final 'approved_orders' list."
+        "- Review 'Trade Proposals'.\n"
+        "- Output 'approved_orders' including both TRADES and VERIFIED HOLDS."
     )
 
-    # We send the proposals as a raw string to avoid parsing errors
     messages = [
         SystemMessage(content=system_text),
         HumanMessage(content=f"Review these proposals: {str(proposals)}")
     ]
 
-    # --- 5. EXECUTE RISK CHECK ---
+    # Execute
     chain = llm.with_structured_output(RiskAssessment)
     
     try:
         decision = chain.invoke(messages)
         
-        # --- 6. MERGE RATIONALE (CRITICAL STEP) ---
-        # The LLM gives us the safe Qty/Side, but might drop the rich text.
-        # We manually copy the text fields from the Quant's proposal back into the final order.
-        
-        # Create a lookup map for the original proposals
+        # Merge Rationale (Critical for "Why we hold")
         proposal_map = {p['symbol']: p for p in proposals}
-        
         final_orders = []
-        approved_symbols = set()
-
+        
         for order in decision.approved_orders:
             original = proposal_map.get(order.symbol)
             if original:
-                approved_symbols.add(order.symbol)
-                
-                # Convert Pydantic model to dict
                 order_dict = order.model_dump()
-                
-                # Inject rich fields from the original proposal
-                # Use 'N/A' defaults just in case
-                order_dict['reasoning'] = original.get('reasoning', 'Rationale not provided')
-                order_dict['risk_analysis'] = original.get('risk_analysis', 'Standard market risk')
+                # Copy rich text
+                order_dict['reasoning'] = original.get('reasoning', 'N/A')
+                order_dict['risk_analysis'] = original.get('risk_analysis', 'N/A')
                 order_dict['expected_return'] = original.get('expected_return', 'N/A')
                 order_dict['stop_loss'] = original.get('stop_loss', 'N/A')
+                order_dict['current_price'] = original.get('current_price', order.current_price)
                 
                 final_orders.append(order_dict)
 
-        # --- 7. LOG REJECTIONS TO MEMORY (RIGOROUSNESS) ---
-        # Identify which proposals were rejected so the Quant agent learns
-        proposed_symbols = set(proposal_map.keys())
-        rejected_symbols = proposed_symbols - approved_symbols
-        
-        for sym in rejected_symbols:
-            log_decision(
-                symbol=sym,
-                action="BUY", # Assuming Long-only logic for rejection context
-                outcome="REJECTED_RISK",
-                reasoning=f"Risk Manager blocked trade. Portfolio Status: {decision.portfolio_status}",
-                strategy="Risk Compliance"
-            )
-
-        # Logging
-        print(f"🛡️ RISK ASSESSMENT COMPLETE: {decision.portfolio_status}")
-        print(f"   ✅ Approved: {len(final_orders)} orders")
-        for o in final_orders:
-            print(f"      - {o['side']} {o['qty']} {o['symbol']} (Reason: {o['reasoning'][:30]}...)")
-        
-        # --- 8. RETURN STATE ---
-        # Handle message history safely
-        result_messages = []
-        if state.get("messages") and len(state["messages"]) > 0:
-            result_messages = [state["messages"][-1]]
-        else:
-            result_messages = [AIMessage(content=f"Risk complete. Approved: {len(final_orders)}")]
-
         return {
             "approved_orders": final_orders,
-            "risk_assessment": decision.portfolio_status, # Persist for main.py
-            "messages": result_messages
+            "risk_assessment": decision.portfolio_status,
+            "messages": [AIMessage(content=f"Risk complete. Approved: {len(final_orders)}")]
         }
 
     except Exception as e:
         print(f"⚠️ RISK ERROR: {e}")
-        return {
-            "approved_orders": [],
-            "error": str(e),
-            "messages": [AIMessage(content=f"Risk Check Failed: {str(e)}")]
-        }
+        return {"approved_orders": [], "error": str(e)}
