@@ -1,3 +1,4 @@
+# agents/quant.py 
 import os
 import google.auth
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -10,7 +11,8 @@ from core.state import AgentState
 from tools.technical_analysis import calculate_technicals
 from tools.trade_memory import fetch_recent_memory
 
-MODEL_NAME = "gemini-2.5-pro"
+# Ensure you use the preview model ID
+MODEL_NAME = "gemini-3-pro-preview"
 
 # --- 1. DATA MODELS ---
 class TradeSignal(BaseModel):
@@ -35,9 +37,12 @@ def quant_analyst_node(state: AgentState):
     Analyzes Technicals + Sentiment + Memory + Portfolio Status to generate a Trade Proposal.
     """
     credentials, project_id = google.auth.default()
+    
+    # Initialize Model (GLOBAL LOCATION IS CRITICAL FOR GEMINI 3 PREVIEW)
     llm = ChatGoogleGenerativeAI(
         model=MODEL_NAME,
         project=os.getenv("GCP_PROJECT_ID", project_id),
+        location="global",
         credentials=credentials
     )
 
@@ -47,15 +52,13 @@ def quant_analyst_node(state: AgentState):
     sentiment_data = state.get("sentiment_data", {})
     sentiment_scores = sentiment_data.get("scores", {})
     
-    # Retrieve current holdings (passed from Data Engineer)
     current_holdings = market_data.get("holdings", [])
     
-    # --- CRITICAL FIX: DEFINE MANDATE ---
-    # Retrieve the strategy mandate from the Portfolio Manager (or default)
-    mandate = state.get("strategy_mandate", "Balanced Steady Growth")
+    # Handle mandate safely (convert to string to be safe)
+    raw_mandate = state.get("strategy_mandate", "Balanced Steady Growth")
+    mandate_str = str(raw_mandate)
     
     technicals_summary = []
-    # Store real prices to force-inject later (preventing LLM hallucinations)
     real_prices = {}
 
     # --- ANALYSIS LOOP ---
@@ -69,22 +72,21 @@ def quant_analyst_node(state: AgentState):
         current_price = tech_data.get('current_price')
         real_prices[symbol] = current_price
         
-        # Get Sentiment
         s_score = sentiment_scores.get(symbol, 0.0)
         
-        # --- 1. MEMORY CHECK ---
+        # Memory Check
         past_decisions = fetch_recent_memory(symbol, lookback_days=7)
         memory_context = "No recent history."
         if past_decisions:
             memory_context = f"⚠️ PAST HISTORY (7 Days): {'; '.join(past_decisions)}"
 
-        # --- 2. HOLDING STATUS CHECK ---
-        # Explicitly tell the LLM if we own this stock or if it's new
+        # Holding Status
         position_status = "❌ NOT OWNED (Watchlist)"
         if symbol in current_holdings:
             position_status = "✅ CURRENT HOLDING (Re-evaluate: HOLD/SELL/BUY MORE?)"
 
-        # Create Summary String for LLM
+        # Create Summary String
+        # We manually format this block, but we DON'T put it into the prompt yet.
         summary = (
             f"TICKER: {symbol}\n"
             f"STATUS: {position_status}\n"
@@ -102,10 +104,13 @@ def quant_analyst_node(state: AgentState):
         print("⚠️ QUANT: No technical data available to analyze.")
         return {"trade_proposal": [], "messages": []}
 
-    # --- 3. PROMPT ENGINEERING ---
+    # --- 3. PROMPT ENGINEERING (FIXED) ---
+    # ERROR FIX: DO NOT use f-strings (f"...") for the Prompt Template inputs.
+    # Use {variable_name} placeholders instead.
+    
     system_prompt = (
         "You are a Senior Portfolio Manager.\n"
-        f"CURRENT STRATEGY MANDATE: '{mandate}'\n\n"
+        "CURRENT STRATEGY MANDATE: '{mandate}'\n\n"  # <--- Placeholder, not f-string
         "GOAL: Manage the lifecycle of the portfolio (Buy New / Sell Existing).\n\n"
         "DECISION RULES:\n"
         "1. FOR CURRENT HOLDINGS (Re-Evaluation):\n"
@@ -124,16 +129,26 @@ def quant_analyst_node(state: AgentState):
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
-        ("human", f"Analyze these assets:\n{technicals_summary}")
+        ("human", "Analyze these assets:\n{asset_data}") # <--- Placeholder
     ])
 
     chain = prompt | llm.with_structured_output(QuantProposal)
     
+    # Join the summary list into one big string
+    assets_text_block = "\n".join(technicals_summary)
+
     try:
-        decision = chain.invoke({})
+        # --- EXECUTE WITH ALL VARIABLES ---
+        # We pass BOTH 'mandate' and 'asset_data' here.
+        # This prevents LangChain from confusing data content with prompt variables.
+        decision = chain.invoke({
+            "mandate": mandate_str,
+            "asset_data": assets_text_block
+        })
+        
         print(f"📈 QUANT PROPOSAL: Generated {len(decision.signals)} signals.")
         
-        # Format for State (and force correct prices)
+        # --- Format Output ---
         final_proposals = []
         for signal in decision.signals:
             sig_dict = signal.dict()
@@ -142,13 +157,10 @@ def quant_analyst_node(state: AgentState):
             if signal.symbol in real_prices:
                 sig_dict['current_price'] = real_prices[signal.symbol]
             
-            # Only pass active signals (BUY/SELL) to Risk Manager to save tokens
-            # (Optional: You can pass HOLDs if you want them logged, but usually we filter)
             if signal.action in ["BUY", "SELL"]:
                 final_proposals.append(sig_dict)
             elif signal.action == "HOLD" and signal.symbol in current_holdings:
-                 # Optionally keep HOLDs for existing positions so we know they were checked
-                 final_proposals.append(sig_dict)
+                final_proposals.append(sig_dict)
 
         return {
             "trade_proposal": final_proposals,

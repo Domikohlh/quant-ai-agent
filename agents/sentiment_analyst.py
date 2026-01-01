@@ -14,7 +14,7 @@ from tools.news_data import news_tools, fetch_financial_news
 # 1. CONFIGURATION
 # ==========================================
 # Gemini 3.0 Flash: High context, low cost, decent reasoning
-MODEL_NAME = "gemini-2.5-flash" 
+MODEL_NAME = "gemini-3-flash-preview"
 
 # ==========================================
 # 2. OUTPUT SCHEMA
@@ -46,6 +46,7 @@ def sentiment_analyst_node(state: AgentState):
     llm = ChatGoogleGenerativeAI(
         model=MODEL_NAME,
         project=os.getenv("GCP_PROJECT_ID", project_id),
+        location = "global",
         credentials=credentials,
         temperature=0.1 # Low temp for consistent scoring
     )

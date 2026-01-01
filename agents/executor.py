@@ -11,7 +11,7 @@ from tools.trade_memory import log_decision
 # 1. CONFIGURATION
 # ==========================================
 # Flash is sufficient for function calling
-MODEL_NAME = "gemini-2.0-flash"
+MODEL_NAME = "gemini-2.5-flash"
 
 # ==========================================
 # 2. AGENT LOGIC

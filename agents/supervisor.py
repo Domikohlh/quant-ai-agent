@@ -43,6 +43,7 @@ def supervisor_node(state: AgentState):
         model=MODEL_NAME,
         project=os.getenv("GCP_PROJECT_ID", project_id),
         credentials=credentials,
+        location = "global",
         temperature=0
     )
 

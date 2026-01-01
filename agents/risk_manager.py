@@ -9,7 +9,7 @@ from core.state import AgentState
 from tools.portfolio import get_current_portfolio
 from tools.trade_memory import log_decision
 
-MODEL_NAME = "gemini-2.5-pro"
+MODEL_NAME = "gemini-3-pro-preview"
 
 # --- OUTPUT SCHEMA ---
 class Order(BaseModel):
@@ -42,6 +42,7 @@ def risk_manager_node(state: AgentState):
         model=MODEL_NAME,
         project=os.getenv("GCP_PROJECT_ID", project_id),
         credentials=credentials,
+        location = "global",
         temperature=0
     )
 
