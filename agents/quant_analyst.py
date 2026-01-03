@@ -1,4 +1,4 @@
-# agents/quant.py 
+# agents/quant_analyst.py
 import os
 import google.auth
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -11,7 +11,7 @@ from core.state import AgentState
 from tools.technical_analysis import calculate_technicals
 from tools.trade_memory import fetch_recent_memory
 
-# Ensure you use the preview model ID
+# Use the latest available preview or stable model
 MODEL_NAME = "gemini-3-pro-preview"
 
 # --- 1. DATA MODELS ---
@@ -38,7 +38,7 @@ def quant_analyst_node(state: AgentState):
     """
     credentials, project_id = google.auth.default()
     
-    # Initialize Model (GLOBAL LOCATION IS CRITICAL FOR GEMINI 3 PREVIEW)
+    # Initialize Model (GLOBAL LOCATION IS CRITICAL FOR PREVIEW MODELS)
     llm = ChatGoogleGenerativeAI(
         model=MODEL_NAME,
         project=os.getenv("GCP_PROJECT_ID", project_id),
@@ -47,9 +47,10 @@ def quant_analyst_node(state: AgentState):
     )
 
     # --- LOAD DATA ---
-    market_data = state.get("market_data", {})
+    market_data = state.get("market_data") or {}
     stocks_raw = market_data.get("stocks", {})
-    sentiment_data = state.get("sentiment_data", {})
+    
+    sentiment_data = state.get("sentiment_data") or {}
     sentiment_scores = sentiment_data.get("scores", {})
     
     current_holdings = market_data.get("holdings", [])

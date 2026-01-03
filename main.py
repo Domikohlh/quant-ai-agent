@@ -81,7 +81,7 @@ def print_trade_deal_sheet(approved_orders):
     print("="*60)
     
     if active_trades:
-        print(f"\n🚀 PROPOSED EXECUTION ({len(active_trades)})")
+        print(f"\n🚀 PROPOSED EXECUTION (Number of proposed trades: {len(active_trades)})")
         print("-" * 60)
         for i, o in enumerate(active_trades, 1):
             icon = "🟢" if o['side'] == "BUY" else "🔴"
@@ -94,7 +94,7 @@ def print_trade_deal_sheet(approved_orders):
             print("-" * 60)
 
     if holds:
-        print(f"\n💼 PORTFOLIO REVIEW ({len(holds)})")
+        print(f"\n💼 PORTFOLIO REVIEW (Number of current holdings: {len(holds)})")
         print("-" * 60)
         for i, o in enumerate(holds, 1):
             price = o.get('current_price', 0.0)
@@ -124,8 +124,8 @@ if __name__ == "__main__":
     recent_tickers_cache = []
 
     print("\n" + "="*50)
-    print("🚀 QUANT AI AGENT: 24/7 SERVICE STARTED")
-    print("   (Press Ctrl+C to Stop)")
+    print("🚀 QUANT AI AGENT: 24/7 SERVICE RUNNING")
+    print("   (Press Ctrl+C to Switch mode OR Stop)")
     print("="*50 + "\n")
     
     if len(sys.argv) > 1:
@@ -140,7 +140,7 @@ if __name__ == "__main__":
             if os.path.exists("force_high.flag"): set_manual_mode("high")
             elif os.path.exists("force_low.flag"): set_manual_mode("low")
             
-            print(f"\n⏰ TIME: {datetime.now().strftime('%H:%M:%S')} | MARKET STATUS: {market_status} | SYSYEM MODE: {mode}")
+            print(f"\n⏰ CURRENT TIME: {datetime.now().strftime('%H:%M:%S')} | MARKET STATUS: {market_status} | SYSYEM MODE: {mode}")
 
             # 2. SLEEP MODE
             if mode == "SLEEP_MODE":
@@ -182,7 +182,7 @@ if __name__ == "__main__":
 
             # 6. POST-CYCLE CHECK
             snapshot = app.get_state(run_config)
-            approved_orders = snapshot.values.get("approved_orders", [])
+            approved_orders = snapshot.values.get("approved_orders") or []
 
             if snapshot.next and snapshot.next[0] == "executor":
                 
@@ -199,11 +199,13 @@ if __name__ == "__main__":
                 if mode == "LOW_MODE":
                     if approved_orders:
                         print("\n🌙 LOW MODE: Abnormal Event Detected.")
+                        print("\n" + "░"*60)
                         save_to_pending_list(approved_orders)
                         # Clear execution blocking
                         for event in app.stream(None, run_config): pass
                     else:
                         print("\n🌙 LOW MODE: Market Calm. No Actions.")
+                        print("\n" + "░"*60)
                         for event in app.stream(None, run_config): pass
                 
                 else:
