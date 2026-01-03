@@ -83,48 +83,93 @@ def get_fundamental_data(symbols: List[str]):
     return pd.DataFrame(metrics)
 
 # --- AGENT TOOL ---
-def screen_stocks(top_n: int = 5) -> List[str]:
+def screen_stocks(top_n: int = 5, mode: str = "standard", exclude_tickers: list = None) -> List[str]:
     """
-    Screens stocks for steady growth and low risk.
-    Combines a static 'Safe' list with dynamic picks from Brave Search.
+    Screens stocks based on a specific 'Mode' for the Iterative Hunt.
     
     Args:
-        top_n: Number of stocks to return (default: 5).
+        top_n: Number of stocks to return.
+        mode: 'standard' (Safe), 'undervalued' (Yield), or 'momentum' (Growth).
+        exclude_tickers: List of symbols to skip (already analyzed).
     """
-    # 1. HYBRID DISCOVERY
-    # Merge the static list with new ideas from the web
-    dynamic_picks = get_tickers_from_brave(query="safest growing S&P 500 stocks 2025")
+    if exclude_tickers is None: exclude_tickers = []
     
-    # Use Set to remove duplicates
-    universe = list(set(STATIC_UNIVERSE + dynamic_picks))
+    print(f"🔍 SCREENER MODE: {mode.upper()} (Excluding {len(exclude_tickers)} items)")
+
+    # 1. SETUP STRATEGY: Define Universe Source & Query
+    if mode == "undervalued":
+        query = "best undervalued high dividend stocks 2025"
+        # Fallback: High yield, low valuation tickers
+        fallback_list = ["T", "VZ", "PFE", "C", "KHC", "BMY", "CVX"]
+        
+    elif mode == "momentum":
+        query = "top high growth momentum stocks 2025"
+        # Fallback: High beta, high growth tickers
+        fallback_list = ["AMD", "PLTR", "UBER", "NET", "DKNG", "CRWD", "NVDA"]
+        
+    else: # "standard" (Default)
+        query = "safest growing S&P 500 stocks 2025"
+        fallback_list = STATIC_UNIVERSE
+
+    # 2. HYBRID DISCOVERY (Brave + Static)
+    dynamic_picks = get_tickers_from_brave(query=query)
+    universe = list(set(fallback_list + dynamic_picks))
     
-    # 2. FETCH DATA
-    df = get_fundamental_data(universe)
+    # 3. EXCLUSION FILTER (Remove previously analyzed stocks)
+    # This forces the screener to look at *new* options on retry
+    filtered_universe = [t for t in universe if t not in exclude_tickers]
+    
+    # If we filtered everything out, try the fallback list again or fail gracefully
+    if not filtered_universe:
+        print("⚠️ All candidates excluded. Resetting to fallback list.")
+        filtered_universe = [t for t in fallback_list if t not in exclude_tickers]
+        if not filtered_universe:
+             return ["SPY"] # Last resort
+
+    # 4. FETCH DATA
+    df = get_fundamental_data(filtered_universe)
     
     if df.empty:
-        print("⚠️ No data found. Defaulting to MSFT/AAPL.")
         return ["MSFT", "AAPL"]
 
-    # 3. FILTER LOGIC (The "Steady Growth" Strategy)
-    # A. Low Volatility: Beta < 1.3 (Slightly relaxed to include Tech)
-    safe_stocks = df[df['beta'] < 1.3].copy()
+    # 5. DYNAMIC FILTERING & RANKING
+    # We apply different weights based on the active mode
     
-    # B. Profitable: Margin > 15%
-    quality_stocks = safe_stocks[safe_stocks['profit_margin'] > 0.15].copy()
+    if mode == "undervalued":
+        # Strategy: Strict on P/E (if we had it) or Yield, Relaxed on Beta
+        # Filter: Must pay a dividend
+        df = df[df['div_yield'] > 0.02].copy()
+        
+        # Rank: Heavily weight Dividend (70%) + Profitability (30%)
+        df['score'] = (df['div_yield'].fillna(0) * 70) + (df['profit_margin'].fillna(0) * 30)
+        
+    elif mode == "momentum":
+        # Strategy: High Growth, Allow High Volatility
+        # Filter: Positive Revenue Growth
+        df = df[df['rev_growth'] > 0.05].copy()
+        
+        # Rank: Heavily weight Growth (60%) + Beta (40%) (High beta = more movement)
+        df['score'] = (df['rev_growth'].fillna(0) * 60) + (df['beta'].fillna(1) * 40)
+        
+    else: # standard
+        # Strategy: The original "Steady Growth" logic
+        # Filter: Low Volatility + High Margin
+        df = df[df['beta'] < 1.5].copy()
+        df = df[df['profit_margin'] > 0.15].copy()
+        
+        # Rank: Balanced
+        df['score'] = (
+            (df['profit_margin'].fillna(0) * 40) +
+            (df['div_yield'].fillna(0) * 30) +
+            (df['rev_growth'].fillna(0) * 30)
+        )
     
-    # 4. RANKING
-    # Score = (Profit Margin * 40) + (Dividend * 30) + (Growth * 30)
-    # This favors cash-rich, paying companies.
-    quality_stocks['score'] = (
-        (quality_stocks['profit_margin'].fillna(0) * 40) +
-        (quality_stocks['div_yield'].fillna(0) * 30) +
-        (quality_stocks['rev_growth'].fillna(0) * 30)
-    )
+    # 6. FINAL SORT
+    df = df[~df['symbol'].isin(exclude_tickers)]
     
-    # Sort
-    top_picks = quality_stocks.sort_values(by='score', ascending=False).head(top_n)
+    top_picks = df.sort_values(by='score', ascending=False).head(top_n)
     
-    print("\n🏆 AI SCREENER RESULTS:")
-    print(top_picks[['symbol', 'beta', 'profit_margin', 'div_yield']])
+    print(f"\n🏆 {mode.upper()} SCREENER RESULTS:")
+    print(top_picks[['symbol', 'score']].to_string(index=False)) # Cleaner print
     
     return top_picks['symbol'].tolist()

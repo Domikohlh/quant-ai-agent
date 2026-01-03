@@ -49,7 +49,11 @@ def risk_manager_node(state: AgentState):
     # Load Context
     portfolio = get_current_portfolio()
     proposals = state.get("trade_proposal", [])
-    market_data = state.get("market_data", {}).get("stocks", {})
+    raw_market_data = state.get("market_data")
+    stock_data = raw_market_data if raw_market_data is not None else {}
+    
+    # Now it is safe to call .get()
+    market_data = stock_data.get("stocks", {})
 
     if not proposals:
         return {"approved_orders": [], "messages": [AIMessage(content="No proposals.")]}

@@ -1,7 +1,8 @@
 # main.py
 import os
 import sys
-from typing import Literal
+import time
+from datetime import datetime
 from dotenv import load_dotenv
 
 # Load Env Vars
@@ -11,7 +12,9 @@ from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 from core.state import AgentState
 
+# Import Tools
 from tools.portfolio import print_portfolio_dashboard
+from tools.time_manager import get_market_status, set_manual_mode
 
 # Import Agents
 from agents.supervisor import supervisor_node
@@ -21,6 +24,7 @@ from agents.quant_analyst import quant_analyst_node
 from agents.risk_manager import risk_manager_node
 from agents.executor import executor_node
 from agents.portfolio_manager import portfolio_manager_node
+from agents.gatekeeper import gatekeeper_node
 
 # ==========================================
 # 1. BUILD THE GRAPH
@@ -31,14 +35,14 @@ def build_graph():
     # A. Add Nodes
     workflow.add_node("supervisor", supervisor_node)
     workflow.add_node("data_engineer", data_engineer_node)
+    workflow.add_node("gatekeeper", gatekeeper_node)
     workflow.add_node("portfolio_manager", portfolio_manager_node)
     workflow.add_node("sentiment_analyst", sentiment_analyst_node)
     workflow.add_node("quant_analyst", quant_analyst_node)
     workflow.add_node("risk_manager", risk_manager_node)
     workflow.add_node("executor", executor_node)
 
-    # B. Define Edges (Routing Logic)
-    # The Supervisor decides 'next_step', so we map that string to a node
+    # B. Define Edges
     workflow.set_entry_point("supervisor")
     
     conditional_map = {
@@ -50,43 +54,25 @@ def build_graph():
         "FINISH": END
     }
     
-    workflow.add_conditional_edges(
-        "supervisor", 
-        lambda x: x["next_step"], 
-        conditional_map
-    )
+    workflow.add_conditional_edges("supervisor", lambda x: x["next_step"], conditional_map)
 
     # C. Return Edges
-    # After work is done, always report back to Supervisor
-    workflow.add_edge("data_engineer", "portfolio_manager")
+    workflow.add_edge("data_engineer", "gatekeeper")
+    workflow.add_edge("gatekeeper", "portfolio_manager")
     workflow.add_edge("portfolio_manager", "supervisor")
     workflow.add_edge("sentiment_analyst", "supervisor")
     workflow.add_edge("quant_analyst", "supervisor")
     workflow.add_edge("risk_manager", "supervisor")
     workflow.add_edge("executor", "supervisor")
 
-    # --- FIX IS HERE ---
-    # 1. Initialize Memory
+    # D. Compile
     memory = MemorySaver()
-    
-    # 2. Attach Checkpointer to the Graph
-    app = workflow.compile(
-        checkpointer=memory,           # <--- This enables .get_state()
-        interrupt_before=["executor"]  # <--- This enables Pausing
-    )
+    app = workflow.compile(checkpointer=memory, interrupt_before=["executor"])
     
     return app
     
 def print_trade_deal_sheet(approved_orders):
-    """
-    Visualizes the Deal Sheet.
-    Separates ACTIVE TRADES from PORTFOLIO HOLDS.
-    """
-    if not approved_orders:
-        print("   (No orders generated)")
-        return
-
-    # Split orders
+    if not approved_orders: return
     active_trades = [o for o in approved_orders if o['side'] in ["BUY", "SELL"]]
     holds = [o for o in approved_orders if o['side'] == "HOLD"]
 
@@ -94,114 +80,167 @@ def print_trade_deal_sheet(approved_orders):
     print(f"📋 STRATEGIC TRADING PLAN")
     print("="*60)
     
-    # 1. ACTIVE TRADES SECTION
     if active_trades:
-        print(f"\n🚀 PROPOSED EXECUTION (Number of proposed trades: {len(active_trades)})")
+        print(f"\n🚀 PROPOSED EXECUTION ({len(active_trades)})")
         print("-" * 60)
         for i, o in enumerate(active_trades, 1):
             icon = "🟢" if o['side'] == "BUY" else "🔴"
             price = o.get('current_price', 0.0)
-            
             print(f"{i}. {icon} {o['side']} {o['symbol']} @ ${price:,.2f}")
             print(f"   ├─ Qty:       {o['qty']}")
             print(f"   ├─ Rationale: {o.get('reasoning', 'N/A')}")
             print(f"   ├─ Return:    {o.get('expected_return', 'N/A')}")
             print(f"   └─ Risk:      {o.get('risk_analysis', 'N/A')}")
             print("-" * 60)
-    else:
-        print("\n🚀 PROPOSED EXECUTION: NONE (Market conditions neutral)")
 
-    # 2. HOLDINGS REVIEW SECTION
     if holds:
-        print(f"\n💼 PORTFOLIO REVIEW (Number of current holdings: {len(holds)})")
+        print(f"\n💼 PORTFOLIO REVIEW ({len(holds)})")
         print("-" * 60)
         for i, o in enumerate(holds, 1):
             price = o.get('current_price', 0.0)
-            
             print(f"{i}. 🟡 HOLD {o['symbol']} (Price: ${price:,.2f})")
             print(f"   ├─ Rationale: {o.get('reasoning', 'N/A')}")
-            print(f"   ├─ Key Level: Stop Loss at {o.get('stop_loss', 'N/A')}")
             print(f"   └─ Verdict:   {o.get('risk_analysis', 'Stable')}")
             print("-" * 60)
-    
     print("="*60 + "\n")
 
+def save_to_pending_list(orders):
+    if not orders: return
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    with open("pending_orders.txt", "a") as f:
+        f.write(f"\n--- PENDING REVIEW ({timestamp}) ---\n")
+        for o in orders:
+            f.write(f"{o['side']} {o['symbol']} (Qty: {o['qty']}) | Reason: {o.get('reasoning')}\n")
+    print(f"📝 {len(orders)} orders saved to 'pending_orders.txt'.")
+
 # ==========================================
-# 2. RUNTIME LOGIC
+# 2. 24/7 DAEMON RUNTIME
 # ==========================================
 if __name__ == "__main__":
     app = build_graph()
     
-    # Initial State
-    initial_state = {
-        "messages": [],
-        "market_data": None,
-        "sentiment_data": None,
-        "trade_proposal": None,
-        "approved_orders": None # <--- Good practice to initialize it
-    }
+    STRATEGIES = ["standard", "momentum", "undervalued"]
+    cycle_index = 0
+    recent_tickers_cache = []
 
-    print("🚀 QUANT AI AGENT STARTED...")
+    print("\n" + "="*50)
+    print("🚀 QUANT AI AGENT: 24/7 SERVICE STARTED")
+    print("   (Press Ctrl+C to Stop)")
+    print("="*50 + "\n")
     
-    # 1. Run until interruption (Executor)
-    # This runs Supervisor -> Data -> Sentiment -> Quant -> Risk... STOP
-    thread = {"configurable": {"thread_id": "1"}}
+    if len(sys.argv) > 1:
+        mode_arg = sys.argv[1].lower()
+        if mode_arg in ["high", "low"]: set_manual_mode(mode_arg)
     
-    for event in app.stream(initial_state, thread):
-        for key, value in event.items():
-            print(f"\nExample Output from Node: {key}")
-            # print(value) # Uncomment to see full state dump
-
-    # 2. Inspect State at Interruption
-    snapshot = app.get_state(thread)
-    if snapshot.next and snapshot.next[0] == "executor":
-        
-        # --- VISUALIZATION STARTS HERE ---
-        # A. Show the Portfolio Book
-        print_portfolio_dashboard()
-        
-        # Show Portfolio health
-        p_data = snapshot.values.get("portfolio_data", {})
-        if p_data:
-            print("\n🏥 PORTFOLIO HEALTH CARD")
-            print("-" * 30)
-            print(f"   ❤️  HHI Score:    {p_data.get('hhi_score')} ({p_data.get('concentration_risk')})")
-            print(f"   📊 Beta:         {p_data.get('portfolio_beta')}")
-            print(f"   🍰 Top Sector:   {max(p_data.get('sector_allocation', {'None':0}), key=p_data.get('sector_allocation', {'None':0}).get)}")
-            print("-" * 30)
-            print(f"   📣 Mandate:      {snapshot.values.get('strategy_mandate')}")
-            print("=" * 60)
-        
-        # B. Show the Proposed Trade (from State)
-        approved_orders = snapshot.values.get("approved_orders", [])
-        print_trade_deal_sheet(approved_orders)
-        print("📋 PENDING ORDERS FOR APPROVAL:")
-        if approved_orders:
-            for o in approved_orders:
-                print(f"   👉 {o['side']} {o['qty']} {o['symbol']} @ Market")
-        else:
-            print("   (No orders generated - Strategy matched HOLD)")
-
-        print("\n" + "-"*30)
-        # --- VISUALIZATION ENDS HERE ---
-
-        # 3. Human Decision
-        user_input = input("✅ Do you approve execution? (yes/no): ").lower()
-        
-        if user_input == "yes":
-            # Resume execution
-            print("⚡ EXECUTION APPROVED. RESUMING...")
-            # We use Command(resume=None) just to unpause the graph
-            # (Use 'None' unless you want to change the state values)
-            from langgraph.types import Command # Ensure Command is imported
+    while True:
+        try:
+            # 1. CHECK TIME & MODE
+            market_status, mode, sleep_seconds = get_market_status()
             
-            # Note: For simple unpausing in LangGraph, you often just run it again
-            # But the correct modern way is often passing the input as a Config or updating state.
-            # However, since 'executor' doesn't take user input directly in our node definition,
-            # we can simply continue the stream.
+            if os.path.exists("force_high.flag"): set_manual_mode("high")
+            elif os.path.exists("force_low.flag"): set_manual_mode("low")
             
-            # Simple Continue:
-            for event in app.stream(None, thread):
+            print(f"\n⏰ TIME: {datetime.now().strftime('%H:%M:%S')} | MARKET STATUS: {market_status} | SYSYEM MODE: {mode}")
+
+            # 2. SLEEP MODE
+            if mode == "SLEEP_MODE":
+                print(f"💤 Market Closed. Sleeping for {sleep_seconds/3600:.1f} hours...")
+                time.sleep(sleep_seconds)
+                continue
+            
+            # 3. SELECT STRATEGY
+            current_strategy = STRATEGIES[cycle_index % len(STRATEGIES)]
+            cycle_index += 1
+            
+            print("\n" + "="*40)
+            print(f"🔄 STARTING CYCLE {cycle_index}")
+            print(f"🎯 CURRENT MISSION: Find '{current_strategy.upper()}' opportunities.")
+            print("="*40)
+            
+            # 4. INITIALIZE STATE
+            initial_state = {
+                "messages": [],
+                "market_data": None,
+                "sentiment_data": None,
+                "trade_proposal": None,
+                "approved_orders": None,
+                "retry_count": 0,
+                "forced_screener_mode": current_strategy,
+                "analyzed_tickers": recent_tickers_cache[-50:],
+                "system_mode": mode
+            }
+
+            # 5. RUN AGENTS (CRITICAL FIX FOR RECURSION ERROR)
+            # We merge thread config and recursion limit into ONE dictionary
+            run_config = {
+                "configurable": {"thread_id": "live_agent_1"},
+                "recursion_limit": 100 # Increased to handle retries
+            }
+
+            for event in app.stream(initial_state, run_config):
                 pass
-        else:
-            print("🛑 EXECUTION REJECTED. SYSTEM SHUTDOWN.")
+
+            # 6. POST-CYCLE CHECK
+            snapshot = app.get_state(run_config)
+            approved_orders = snapshot.values.get("approved_orders", [])
+
+            if snapshot.next and snapshot.next[0] == "executor":
+                
+                # Cache Updates
+                newly_analyzed = snapshot.values.get("analyzed_tickers", [])
+                recent_tickers_cache.extend(newly_analyzed)
+                if len(recent_tickers_cache) > 100:
+                    recent_tickers_cache = recent_tickers_cache[-100:]
+
+                print("\n" + "░"*60)
+                print("░░░                  CYCLE SUMMARY                  ░░░")
+                print("░"*60)
+
+                if mode == "LOW_MODE":
+                    if approved_orders:
+                        print("\n🌙 LOW MODE: Abnormal Event Detected.")
+                        save_to_pending_list(approved_orders)
+                        # Clear execution blocking
+                        for event in app.stream(None, run_config): pass
+                    else:
+                        print("\n🌙 LOW MODE: Market Calm. No Actions.")
+                        for event in app.stream(None, run_config): pass
+                
+                else:
+                    # HIGH MODE
+                    print_portfolio_dashboard()
+                    print_trade_deal_sheet(approved_orders)
+                    
+                    active_trades = [o for o in approved_orders if o['side'] in ["BUY", "SELL"]]
+                    
+                    if active_trades:
+                        print("\n" + "!"*60)
+                        user_input = input("✅ EXECUTE TRADES? (yes/no): ").lower()
+                        print("!"*60)
+                        
+                        if user_input == "yes":
+                            print("⚡ EXECUTING...")
+                            for event in app.stream(None, run_config): pass
+                        else:
+                            print("🛑 CANCELLED.")
+                    else:
+                        print("\nℹ️ No active trades. Finishing cycle.")
+                        for event in app.stream(None, run_config): pass
+
+            # 7. SLEEP
+            print("\n" + "="*40)
+            print(f"⏳ CYCLE COMPLETE. Sleeping for {sleep_seconds} seconds...")
+            print("="*40 + "\n")
+            time.sleep(sleep_seconds)
+
+        except KeyboardInterrupt:
+            user_choice = input("\n🛑 STOPPED. Switch Mode? (high/low/auto/exit): ").lower()
+            if user_choice in ["high", "low", "auto"]:
+                if user_choice == "auto": set_manual_mode(None)
+                else: set_manual_mode(user_choice)
+                continue
+            else:
+                break
+        except Exception as e:
+            print(f"\n❌ CRITICAL LOOP ERROR: {e}")
+            time.sleep(60)

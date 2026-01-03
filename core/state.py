@@ -15,3 +15,6 @@ class AgentState(TypedDict):
     # --- NEW FIELDS ---
     portfolio_data: Optional[dict]    # The HHI/Beta numbers
     strategy_mandate: Optional[str]
+
+    retry_count: int              # How many loops have we done? (0, 1, 2)
+    analyzed_tickers: List[str]   # List of symbols we already checked today
