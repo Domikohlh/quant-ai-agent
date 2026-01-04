@@ -1,20 +1,25 @@
+# agents/supervisor.py
 import os
 import google.auth
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from typing import Literal
 
 from core.state import AgentState
 
-MODEL_NAME = "gemini-3-flash-preview"
+MODEL_NAME = "gemini-3-pro-preview"
 MAX_RETRIES = 5
+TARGET_PENDING_ORDERS = 5
 
 class SupervisorDecision(BaseModel):
     next_step: Literal["data_engineer", "sentiment_analyst", "quant_analyst", "risk_manager", "executor", "FINISH"]
     reasoning: str
 
 def supervisor_node(state: AgentState):
+    """
+    Supervisor Node with 'Batch Processing' Loop.
+    """
     credentials, project_id = google.auth.default()
     llm = ChatGoogleGenerativeAI(
         model=MODEL_NAME,
@@ -24,71 +29,94 @@ def supervisor_node(state: AgentState):
         temperature=0
     )
 
-    # --- 1. SAFE ACCESS (CRITICAL FIX) ---
-    # Never allow None to crash the logic
-    market_data = state.get("market_data") or {}
-    stocks_present = bool(market_data.get("stocks"))
-    
-    approved_orders = state.get("approved_orders")
+    # --- 1. STATE INSPECTION ---
+    trade_proposal = state.get("trade_proposal")
+    approved_orders = state.get("approved_orders") or []
     retry_count = state.get("retry_count", 0)
     system_mode = state.get("system_mode", "HIGH_MODE")
     
-    flag_risk_checked = "YES" if approved_orders is not None else "NO"
+    # Load counts
+    initial_pending_count = state.get("pending_count", 0)
+    current_session_count = len(approved_orders)
+    total_pending = initial_pending_count + current_session_count
+    
+    market_condition = state.get("market_condition", "CALM")
 
-    # --- 2. RETRY LOGIC (LOOP PREVENTION) ---
-    if flag_risk_checked == "YES":
-        active_buys = [o for o in approved_orders if o['side'] == "BUY"]
+    # ============================================================
+    # 🌙 LOW MODE GATEKEEPING
+    # ============================================================
+    if system_mode == "LOW_MODE":
+        # If we have reached our target, we force sleep/monitor
+        if total_pending >= TARGET_PENDING_ORDERS:
+            if market_condition == "CALM":
+                print(f"🌙 SUPERVISOR: Target Reached ({total_pending}/{TARGET_PENDING_ORDERS}). Sleeping.")
+                return {"next_step": "FINISH"}
         
-        if not active_buys:
-            if retry_count < MAX_RETRIES:
-                print(f"🔄 SUPERVISOR: No buys. Retrying (Attempt {retry_count + 1})...")
-                return {
-                    "next_step": "data_engineer",
-                    "retry_count": retry_count + 1,
-                    # Clear proposals, but keep market data structure valid
-                    "trade_proposal": [],
-                    "approved_orders": None
-                }
-            else:
-                print("🛑 SUPERVISOR: Max retries reached.")
-                return {"next_step": "executor"}
+        # If Data Engineer says "CALM" and we aren't hunting, sleep.
+        if market_condition == "CALM" and total_pending >= TARGET_PENDING_ORDERS:
+             return {"next_step": "FINISH"}
 
-    # --- 3. ABNORMAL SENTIMENT CHECK (MODE AWARE) ---
-    sentiment_data = state.get("sentiment_data") or {}
-    is_abnormal = False
+    # ============================================================
+    # 🔄 BATCH LOOP (The "Fill the Basket" Logic)
+    # ============================================================
+    # Logic: If Risk Manager has finished (flag_risk=YES), check if we need more orders.
+    # We check if approved_orders has changed or if we are at the end of a flow.
     
-    # Only check this if we are in LOW MODE (Sleeping)
-    # If in HIGH MODE, we run Quant anyway, so no need to alarm.
-    if system_mode == "LOW_MODE" and sentiment_data:
-        for score in sentiment_data.get("scores", {}).values():
-            if abs(score) > 0.8:
-                is_abnormal = True
-                print("🚨 SUPERVISOR: Abnormal Sentiment during Sleep!")
-                break
+    flag_risk = "YES" if state.get("approved_orders") is not None else "NO"
+    
+    # Check if we just finished a successful pass (Risk approved something or rejected it)
+    # We differentiate "Risk Done" from "Just Started" by checking if trade_proposal is set.
+    if flag_risk == "YES" and trade_proposal is not None:
+        
+        if total_pending < TARGET_PENDING_ORDERS:
+            print(f"🔄 BATCHING: Basket not full ({total_pending}/{TARGET_PENDING_ORDERS}). Looping back...")
+            return {
+                "next_step": "data_engineer",
+                "retry_count": 0,          # Reset retry for new hunt
+                "trade_proposal": None,    # Reset Quant
+                # We KEEP approved_orders to accumulate them (assuming state appends)
+                # We KEEP analyzed_tickers so Data Engineer finds NEW stocks
+            }
 
-    # --- 4. ROUTING LOGIC ---
-    # Flags
-    flag_data = "YES" if stocks_present else "NO"
-    flag_sent = "YES" if state.get("sentiment_data") else "NO"
-    flag_prop = "YES" if state.get("trade_proposal") else "NO"
+    # ============================================================
+    # ⚡ FAST TRACK: SHORT-CIRCUIT RETRY (Quant Failed)
+    # ============================================================
+    if trade_proposal is not None and len(trade_proposal) == 0:
+        if retry_count < MAX_RETRIES:
+            print(f"⚡ FAST TRACK: Quant found 0 signals. Immediate Retry (Attempt {retry_count + 1})...")
+            return {
+                "next_step": "data_engineer",
+                "retry_count": retry_count + 1,
+                "trade_proposal": None,
+            }
+        else:
+            print("🛑 SUPERVISOR: Max retries reached (Fast Track).")
+            # If we failed to find anything, check if we should still loop or quit
+            if total_pending < TARGET_PENDING_ORDERS and system_mode == "LOW_MODE":
+                 # Optional: force sleep if we failed 5 times in a row to prevent infinite loop
+                 return {"next_step": "FINISH"}
+            return {"next_step": "executor"}
+
+    # ============================================================
+    # 🔄 STANDARD ROUTING
+    # ============================================================
+    market_data = state.get("market_data") or {}
+    flag_data = "YES" if bool(market_data.get("stocks")) else "NO"
+    flag_sent = "YES" if state.get("sentiment_data") is not None else "NO"
+    flag_prop = "YES" if trade_proposal is not None else "NO"
     
-    # A. Special Case: Low Mode Logic
+    # A. Low Mode Logic
     if flag_data == "YES" and flag_sent == "YES" and flag_prop == "NO":
         if system_mode == "LOW_MODE":
-            if is_abnormal:
-                return {"next_step": "quant_analyst"} # Wake up
-            else:
-                return {"next_step": "FINISH"} # Go back to sleep
-        else:
-            return {"next_step": "quant_analyst"} # Normal flow
+            return {"next_step": "quant_analyst"}
 
-    # B. Standard Routing
+    # B. LLM Routing
     members = ["data_engineer", "sentiment_analyst", "quant_analyst", "risk_manager", "executor"]
     
     system_prompt = (
         "You are the Supervisor.\n"
-        f"STATE: Data={flag_data}, Sent={flag_sent}, Prop={flag_prop}, Risk={flag_risk_checked}\n"
-        "RULES:\n"
+        f"STATE: Data={flag_data}, Sent={flag_sent}, Prop={flag_prop}, Risk={flag_risk}\n"
+        "ROUTING RULES:\n"
         "1. No Data -> data_engineer\n"
         "2. No Sentiment -> sentiment_analyst\n"
         "3. No Proposal -> quant_analyst\n"
@@ -106,7 +134,12 @@ def supervisor_node(state: AgentState):
     
     try:
         response = chain.invoke(state)
-        print(f"🕵️ SUPERVISOR: {response.next_step}")
-        return {"next_step": response.next_step}
+        decision = response.next_step
+        
+        if flag_prop == "YES" and flag_risk == "NO":
+            decision = "risk_manager"
+            
+        print(f"🕵️ SUPERVISOR: {decision}")
+        return {"next_step": decision}
     except:
         return {"next_step": "FINISH"}

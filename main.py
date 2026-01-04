@@ -68,8 +68,15 @@ def build_graph():
     # D. Compile
     memory = MemorySaver()
     app = workflow.compile(checkpointer=memory, interrupt_before=["executor"])
-    
     return app
+    
+def count_pending_orders():
+    """Counts lines in the pending file to enforce the limit."""
+    if not os.path.exists("pending_orders.txt"):
+        return 0
+    with open("pending_orders.txt", "r") as f:
+        # Count lines that look like orders (contain '|')
+        return sum(1 for line in f if "|" in line)
     
 def print_trade_deal_sheet(approved_orders):
     if not approved_orders: return
@@ -124,8 +131,8 @@ if __name__ == "__main__":
     recent_tickers_cache = []
 
     print("\n" + "="*50)
-    print("🚀 QUANT AI AGENT: 24/7 SERVICE RUNNING")
-    print("   (Press Ctrl+C to Switch mode OR Stop)")
+    print("🚀 QUANT AI AGENT: 24/7 SERVICE STARTED")
+    print("   (Press Ctrl+C to Stop)")
     print("="*50 + "\n")
     
     if len(sys.argv) > 1:
@@ -140,7 +147,7 @@ if __name__ == "__main__":
             if os.path.exists("force_high.flag"): set_manual_mode("high")
             elif os.path.exists("force_low.flag"): set_manual_mode("low")
             
-            print(f"\n⏰ CURRENT TIME: {datetime.now().strftime('%H:%M:%S')} | MARKET STATUS: {market_status} | SYSYEM MODE: {mode}")
+            print(f"\n⏰ CURRENT TIME: {datetime.now().strftime('%H:%M:%S')} | MARKET STATUS: {market_status} | SYSTEM MODE: {mode}")
 
             # 2. SLEEP MODE
             if mode == "SLEEP_MODE":
@@ -158,6 +165,8 @@ if __name__ == "__main__":
             print("="*40)
             
             # 4. INITIALIZE STATE
+            pending_count = count_pending_orders()
+            
             initial_state = {
                 "messages": [],
                 "market_data": None,
@@ -167,14 +176,14 @@ if __name__ == "__main__":
                 "retry_count": 0,
                 "forced_screener_mode": current_strategy,
                 "analyzed_tickers": recent_tickers_cache[-50:],
+                "pending_count": pending_count,
                 "system_mode": mode
             }
 
-            # 5. RUN AGENTS (CRITICAL FIX FOR RECURSION ERROR)
-            # We merge thread config and recursion limit into ONE dictionary
+            # 5. RUN AGENTS (WITH RECURSION FIX)
             run_config = {
                 "configurable": {"thread_id": "live_agent_1"},
-                "recursion_limit": 100 # Increased to handle retries
+                "recursion_limit": 100
             }
 
             for event in app.stream(initial_state, run_config):
@@ -182,6 +191,8 @@ if __name__ == "__main__":
 
             # 6. POST-CYCLE CHECK
             snapshot = app.get_state(run_config)
+            
+            # SAFE ACCESS to prevent NoneType error
             approved_orders = snapshot.values.get("approved_orders") or []
 
             if snapshot.next and snapshot.next[0] == "executor":
@@ -196,24 +207,23 @@ if __name__ == "__main__":
                 print("░░░                  CYCLE SUMMARY                  ░░░")
                 print("░"*60)
 
+                # Identify Active Trades vs Passive Holds
+                active_trades = [o for o in approved_orders if o['side'] in ["BUY", "SELL"]]
+
                 if mode == "LOW_MODE":
-                    if approved_orders:
-                        print("\n🌙 LOW MODE: Abnormal Event Detected.")
-                        print("\n" + "░"*60)
-                        save_to_pending_list(approved_orders)
-                        # Clear execution blocking
-                        for event in app.stream(None, run_config): pass
+                    # FIX: Only save if there are ACTUAL TRADES (Ignore HOLDs)
+                    if active_trades:
+                        print("\n🌙 LOW MODE: Active Trading Opportunity Detected.")
+                        save_to_pending_list(active_trades)
+                        print("   (Sleeping... Execution skipped in Low Mode)")
+                        # FIX: DO NOT RESUME. Just let the loop restart.
                     else:
-                        print("\n🌙 LOW MODE: Market Calm. No Actions.")
-                        print("\n" + "░"*60)
-                        for event in app.stream(None, run_config): pass
+                        print("\n🌙 LOW MODE: Market Calm. No Active Trades.")
                 
                 else:
-                    # HIGH MODE
+                    # HIGH MODE (INTERACTIVE)
                     print_portfolio_dashboard()
                     print_trade_deal_sheet(approved_orders)
-                    
-                    active_trades = [o for o in approved_orders if o['side'] in ["BUY", "SELL"]]
                     
                     if active_trades:
                         print("\n" + "!"*60)

@@ -6,31 +6,25 @@ import pandas as pd
 import ssl
 import certifi
 
-# Global SSL Context Fix (Crucial for Mac/Local environments)
+# Global SSL Context Fix
 ssl._create_default_https_context = ssl._create_unverified_context
 
 # Initialize Clients
-# Note: Alpaca client removed. yfinance does not need authentication.
 fred = Fred(api_key=os.getenv("FRED_API_KEY"))
+
+# ... (fetch_market_data remains the same) ...
 
 def fetch_market_data(symbols: list[str], period: str = "1mo", interval: str = "1h") -> dict:
     """
     Fetches OHLCV data using Yahoo Finance.
-    Arguments:
-        symbols: List of tickers.
-        period: Data duration ("1d", "5d", "1mo", "1y", "max").
-        interval: Bar size ("1m", "5m", "15m", "1h", "1d").
     """
     print(f"📉 FETCHING YFINANCE DATA FOR: {symbols} (Interval: {interval})")
     
     market_data = {}
     
-    # We iterate to handle each symbol safely and normalize headers
     for symbol in symbols:
         try:
             ticker = yf.Ticker(symbol)
-            # Fetch history
-            # auto_adjust=True fixes splits/dividends in one go
             hist = ticker.history(period=period, interval=interval, auto_adjust=True)
             
             if hist.empty:
@@ -38,18 +32,9 @@ def fetch_market_data(symbols: list[str], period: str = "1mo", interval: str = "
                 market_data[symbol] = []
                 continue
 
-            # --- NORMALIZATION STEP ---
-            # 1. Reset Index to make Date/Datetime a column
+            # Normalization
             hist = hist.reset_index()
-            
-            # 2. Lowercase column names for compatibility with Technical Analysis tools
-            # (Converts 'Date', 'Open', 'Close' -> 'date', 'open', 'close')
             hist.columns = [c.lower() for c in hist.columns]
-            
-            # 3. Rename specific time column if needed (yfinance uses 'date' or 'datetime')
-            # Ensure we have a consistent time key if needed, but 'date' is standard.
-            
-            # Convert to list of dictionaries
             market_data[symbol] = hist.to_dict(orient="records")
             
         except Exception as e:
@@ -58,25 +43,56 @@ def fetch_market_data(symbols: list[str], period: str = "1mo", interval: str = "
 
     return market_data
 
-def fetch_macro_data() -> dict:
+def fetch_macro_data(series_ids: list[str] = None) -> dict:
     """
     Fetches key macro indicators from FRED.
+    Arguments:
+        series_ids: List of FRED Series IDs (e.g., ['VIXCLS', 'DGS10', 'GDP']).
+                    Defaults to VIX only if None.
     """
-    print("🏦 FETCHING MACRO DATA (FRED)...")
+    # 1. Default to VIX if nothing requested
+    if not series_ids:
+        series_ids = ["VIXCLS"]
+
+    print(f"🏦 FETCHING MACRO DATA (FRED): {series_ids}...")
+    macro_data = {}
+
     try:
-        # VIXCLS = CBOE Volatility Index
-        vix_series = fred.get_series('VIXCLS', limit=10)
+        for series_id in series_ids:
+            try:
+                # Fetch last 10 points to ensure we get a non-NaN value
+                series = fred.get_series(series_id, limit=10)
+                
+                if series.empty:
+                    print(f"   ⚠️ Series {series_id} returned no data.")
+                    macro_data[series_id] = None
+                    continue
+
+                # Get the last valid value (latest date)
+                latest_value = series.dropna().iloc[-1]
+                latest_date = series.dropna().index[-1].strftime('%Y-%m-%d')
+                
+                macro_data[series_id] = {
+                    "value": float(latest_value),
+                    "date": latest_date
+                }
+                
+            except Exception as e_inner:
+                print(f"   ⚠️ Failed to fetch {series_id}: {e_inner}")
+                macro_data[series_id] = None
+
+        # 2. Add Derivative Logic (Market Condition)
+        # If VIX is present, we calculate the 'Mood'
+        vix_entry = macro_data.get("VIXCLS")
+        if vix_entry:
+            vix_val = vix_entry["value"]
+            macro_data["MARKET_CONDITION"] = "VOLATILE" if vix_val > 20 else "STABLE"
         
-        # Handle case where FRED returns NaN for the very last day
-        vix = vix_series.dropna().iloc[-1] if not vix_series.empty else 20.0
-        
-        return {
-            "VIX": float(vix),
-            "MARKET_CONDITION": "VOLATILE" if vix > 20 else "STABLE"
-        }
+        return macro_data
+
     except Exception as e:
-        print(f"⚠️ FRED ERROR: {e}")
-        return {"VIX": 0.0, "ERROR": str(e)}
+        print(f"⚠️ FRED FATAL ERROR: {e}")
+        return {"ERROR": str(e)}
 
 # Export tools
 data_tools = [fetch_market_data, fetch_macro_data]

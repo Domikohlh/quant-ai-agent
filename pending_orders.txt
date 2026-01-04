@@ -5,3 +5,13 @@ BUY KO (Qty: 116.0) | Reason: Price is testing Lower Band support with deeply ov
 
 --- PENDING REVIEW (2026-01-04 00:07:22) ---
 HOLD KO (Qty: 0.0) | Reason: Deeply oversold RSI (23.90) at Lower Band signals value, but negative sentiment (-0.1) strictly prohibits 'Buy More' action per rules.
+
+--- PENDING REVIEW (2026-01-05 00:03:47) ---
+BUY MCD (Qty: 65.0) | Reason: Composite Score 60.5/100 qualifies for BUY, driven by high Sentiment (85.0) and oversold RSI (31.4) fitting the Blue Chip mandate.
+BUY JPM (Qty: 61.0) | Reason: Composite Score 64.0/100 strongly exceeds threshold, driven by robust Sentiment (85.0) and stable Technicals.
+
+--- PENDING REVIEW (2026-01-05 00:48:12) ---
+BUY JPM (Qty: 61.0) | Reason: Composite Score 62.5 exceeds threshold driven by strong Sentiment (80.0), fitting the Blue Chip core mandate.
+
+--- PENDING REVIEW (2026-01-05 01:09:27) ---
+BUY JPM (Qty: 46.0) | Reason: Composite Score 64.0 > 60 threshold; strong Sentiment (85.0) drives the score fitting the Blue Chip mandate.

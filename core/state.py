@@ -18,3 +18,6 @@ class AgentState(TypedDict):
 
     retry_count: int              # How many loops have we done? (0, 1, 2)
     analyzed_tickers: List[str]   # List of symbols we already checked today
+
+    market_condition: Optional[str] # "CALM", "VOLATILE", "OPPORTUNITY"
+    pending_count: int  
