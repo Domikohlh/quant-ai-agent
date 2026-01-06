@@ -11,8 +11,13 @@ ta                  # Technical Analysis library
 pydantic
 google-cloud-logging
 mcp                 # Model Context Protocol SDK
-alpaca-py
 pandas_ta
 fredapi
 yfinance
 pytz 
+fastmcp
+uv
+pandas
+google-genai
+google-adk
+
