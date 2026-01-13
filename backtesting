@@ -1,0 +1,135 @@
+class BacktestConfig:
+    """ Configuration container for backtest parameters ""
+    def __init__(self):
+        # File paths - auto-detect files in the current directory
+        self.price_file = None # DONT CHANGE
+        self.feature_file = None # DONT CHANGE
+        self.output_dir = "outputTest" # DONT CHANGE
+        self.output_prefix = "strategy"
+        
+        # Auto-detect files in current directory
+
+        csv_files = glob.glob("*.csv")
+        
+        if len(csv_files) >= 2:
+            # Mbtcod 1: Look for files with 'price' in the name
+            price_files = [f for f in csv_files if 'price' in f.lower()]
+            if price_files:
+                self.price_file = price_files[0]
+                # Feature file is the other file
+                feature_files = [f for f in csv_files if f != self.price_file]
+                if feature_files:
+                    self.feature_file = feature_files[0]
+            else:
+                # Mbtcod 2: Use any two CSV files (first two found)
+                self.price_file = csv_files[0]
+                self.feature_file = csv_files[1]
+            
+            print(f"Auto-detected files:")
+            print(f"  Price file: {self.price_file}")
+            print(f"  Feature file: {self.feature_file}")
+        
+        # Fallback to hardcoded names if no files detected 
+        # ##### CHANGE HERE #####
+        if not self.price_file:
+            self.price_file = ""
+            self.feature_file =""
+            self.output_dir = ""
+            # Check if hardcoded files exist
+            current_dir = os.getcwd()
+            if not os.path.exists(self.price_file):
+                price_path = os.path.join(current_dir, self.price_file)
+                feature_path = os.path.join(current_dir, self.feature_file)
+                
+                if os.path.exists(price_path):
+                    self.price_file = price_path
+                    self.feature_file = feature_path
+                    print(f"Using abbtcute paths: {self.price_file}")
+                else:
+                    print(f"Warning: Could not find CSV files in current directory: {current_dir}")
+                    print(f"Looking for: {self.price_file} and {self.feature_file}")
+                    print(f"Make sure you're running the script from the correct directory or the files are uploaded to AWS S3.")
+        
+        # Portfolio settings
+        self.initial_portfolio = 1000000.0
+        self.base_position_size = 0.3
+        #self.base_position_size = 0.1
+        self.transaction_cost = 0.00025
+        self.risk_free_rate = 0.036
+        
+        # Entry/Exit parameters
+        self.entry_threshold = -2.035
+        self.entry_direction = "below"
+        self.exit_threshold = 2.342
+        self.exit_direction = "above"
+        self.max_hold_hours = 144
+ 
+        # Feature settings
+        self.feature_type = "zscore" # Options: "zscore", "roc", "percent_b", "bandwidth", "threshold_cross"
+        self.feature_column = None
+        self.price_column = None
+ 
+        # Stop Loss and Take Profit settings
+        self.stop_loss_enabled = True
+        self.stop_loss_percentage = -0.03 # 5% stop loss (negative value)
+        self.take_profit_enabled = True
+        self.take_profit_percentage = 0.15 # 10% take profit (positive value)
+ 
+
+        # Position sizing
+        self.sigmoid_midpoint = 2.0
+        self.sigmoid_steepness = 1.0
+        self.min_position_factor = 0.25
+        self.max_position_factor = 4.0
+        self.target_mean_factor = 2.0
+
+        # Date parsing settings
+        self.date_format = None  # If None, will auto-detect. Otherwise specify format like '%Y-%m-%d %H:%M:%S'
+        self.dayfirst = True  # For ambiguous dates, prefer DD/MM/YYYY over MM/DD/YYYY
+        
+        # Feature lagging settings
+        self.feature_lag_periods = 0  # Number of periods to lag the feature data (0 = no lag)
+        
+        # Monte Carlo settings
+        self.monte_carlo_enabled = False
+        self.monte_carlo_iterations = 1000
+        self.monte_carlo_seed = 42
+        # Note: Sigmoid recalibration removed - features are fixed in Monte Carlo,
+        # only prices are shuffled, so sigmoid parameters should remain unchanged
+        
+        # Parallel processing settings
+        self.parallel_mode = True  # Enable/disable parallel processing
+        self.num_processes = None  # None = use all available cores
+        
+        # Walkforward settings
+        self.walkforward_enabled = False
+        self.walkforward_period = 'month'
+        self.walkforward_train = 12
+        self.walkforward_test = 6
+        self.walkforward_step = 3
+ 
+        # Walkforward Monte Carlo settings
+        self.walkforward_monte_carlo_enabled = False  # New parameter
+
+        # Grid Search settings
+        self.grid_search_enabled = False
+        self.grid_search_params =   {
+            'entry_threshold': [-1.948, -2.414],
+            'exit_threshold': [1.777, 2.221],
+            'base_position_size': [0.15, 0.30],
+            'max_hold_hours': [36, 72, 108, 144],
+            'stop_loss_enabled': [True],
+            'stop_loss_percentage': [-0.03, -0.05, -0.08],  # Only used if stop_loss_enabled=True
+            'take_profit_enabled': [True],
+            'take_profit_percentage': [0.05, 0.10, 0.15],   # Only used if take_profit_enabled=True
+        }
+        self.grid_search_objectives = ['sharpe_ratio', 'total_return', 'profit_factor']  # Optimization objectives
+
+        # Trading mode configuration (CHANGE HERE)
+        self.trading_mode = "short_only"  # Options: "long_only", "short_only"
+        
+        # Leverage and borrowing settings
+        self.leverage_multiplier = 1  # Default no leverage (1.0), can be increased later
+        self.max_leverage = 1  # Maximum allowed leverage
+        self.borrowing_rate_annual = 0.0  # 1% annual borrowing rate for shorts
+        self.borrowing_setup_fee = 0.0  # Setup fee for short positions (set to 0 for now)
