@@ -133,3 +133,476 @@ class BacktestConfig:
         self.max_leverage = 1  # Maximum allowed leverage
         self.borrowing_rate_annual = 0.0  # 1% annual borrowing rate for shorts
         self.borrowing_setup_fee = 0.0  # Setup fee for short positions (set to 0 for now)
+
+
+class BacktestEngine:
+    """Main backtest execution engine"""
+    
+    def __init__(self, config: BacktestConfig, data: pd.DataFrame, feature_col: str, price_col: str):
+        self.config = config
+        self.data = data
+        self.feature_col = feature_col
+        self.price_col = price_col
+        self.position_manager = PositionManager(config)
+        
+        # Portfolio state
+        self.cash = config.initial_portfolio
+        self.btc_held = 0.0  # btc held in long positions
+        self.btc_borrowed = 0.0  # btc borrowed for short positions
+        self.initial_equity = config.initial_portfolio  # Track original capital
+        self.trades = []
+        self.portfolio_history = []
+        
+        # Borrowing cost tracking
+        self.borrowing_rate_hourly = config.borrowing_rate_annual / 365.25 / 24  # Convert annual to hourly
+        self.last_borrowing_cost_time = None
+        
+        # Debug logging
+        self.debug_log = []
+    
+    def run(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Run the backtest simulation"""
+        print("Running backtest...")
+        
+        # Log initial data state
+        self.debug_log.append(f"Initial data shape: {self.data.shape}")
+        self.debug_log.append(f"First few rows of data:")
+        self.debug_log.append(str(self.data.head()))
+        
+        # Add initial portfolio state
+        self._record_portfolio_state(0)
+        
+        # Main backtest loop
+        for i in range(1, len(self.data)):
+            current_time = self.data.iloc[i]['timestamp']
+            current_price = float(self.data.iloc[i][self.price_col])
+            current_feature = float(self.data.iloc[i][self.feature_col])
+            
+            # Log current state
+            if i % 1000 == 0:  # Log every 1000th iteration
+                self.debug_log.append(f"\nIteration {i}:")
+                self.debug_log.append(f"Time: {current_time}")
+                self.debug_log.append(f"Price: {current_price}")
+                self.debug_log.append(f"Feature: {current_feature}")
+                self.debug_log.append(f"Cash: {self.cash}")
+                self.debug_log.append(f"btc held: {self.btc_held}")
+            
+            # Check exit conditions
+            positions_to_close = self.position_manager.check_exit_conditions(current_time, current_feature, current_price)
+            
+            # Remove the problematic scaling logic that was preventing short closures
+            # (The _execute_trades mbtcod now handles balance checks properly)
+            # Calculate net position change
+            # total_btc_to_sell = sum(pos[0]['btc_amount'] for pos in positions_to_close)
+
+            # if total_btc_to_sell > self.btc_held and self.config.trading_mode == "long_only":
+            #     scale_factor = self.btc_held / total_btc_to_sell if total_btc_to_sell > 0 else 0
+            #     # print(f"Warning: Attempting to sell more btc than held. Scaling down by {scale_factor:.4f}")
+            #     for p in positions_to_close:
+            #         p[0]['btc_amount'] *= scale_factor
+            #     total_btc_to_sell = self.btc_held     
+
+            # Check for new entry
+            new_position_btc = 0
+            position_size_factor = 0
+            
+            # Check entry condition based on direction
+            entry_signal = False
+            if self.config.entry_direction == "above":
+                entry_signal = current_feature > self.config.entry_threshold
+            else:  # below
+                entry_signal = current_feature < self.config.entry_threshold
+            
+            # Determine position direction based on trading mode
+            position_direction = 1  # Default to long
+            if self.config.trading_mode == "short_only":
+                position_direction = -1
+            elif self.config.trading_mode == "long_only":
+                position_direction = 1
+
+            
+            if entry_signal:
+                position_size_factor = self.position_manager.calculate_position_size_factor(current_feature)
+                if position_size_factor > 0:
+                    # Use conservative equity for position sizing (no unrealized gains)
+                    available_equity = self._calculate_available_equity_for_sizing(current_price)
+                    position_size_usd = available_equity * self.config.base_position_size * position_size_factor
+                    # Apply leverage if configured
+                    position_size_usd *= self.config.leverage_multiplier
+                    new_position_btc = position_size_usd / current_price if current_price > 0 else 0
+                    
+                    # Debug logging for position sizing
+                    if i % 100 == 0:  # Log every 100th calculation
+                        true_equity = self._calculate_true_equity(current_price)
+                        self.debug_log.append(f"Position sizing debug at {current_time}:")
+                        self.debug_log.append(f"  Cash: {self.cash}")
+                        self.debug_log.append(f"  btc borrowed: {self.btc_borrowed}")
+                        self.debug_log.append(f"  Current price: {current_price}")
+                        self.debug_log.append(f"  True equity: {true_equity}")
+                        self.debug_log.append(f"  Available equity (conservative): {available_equity}")
+                        self.debug_log.append(f"  Position size factor: {position_size_factor}")
+                        self.debug_log.append(f"  Position size USD: {position_size_usd}")
+                        self.debug_log.append(f"  New position btc: {new_position_btc}")
+            
+            # Apply borrowing costs for short positions
+            # if self.btc_borrowed > 0:
+            #     self._apply_borrowing_costs(current_time)
+            
+            # Execute trades
+            self._execute_trades(i, positions_to_close, new_position_btc, position_size_factor, position_direction)
+            
+            # Update position tracking
+            self.position_manager.close_positions(positions_to_close)
+            
+            # Record portfolio state
+            self._record_portfolio_state(i)
+        
+        print("Backtest completed.")
+        
+        # Save debug log
+        if not os.path.exists(self.config.output_dir):
+            os.makedirs(self.config.output_dir)
+        debug_file = os.path.join(self.config.output_dir, f"{self.config.output_prefix}_debug_log.txt")
+        with open(debug_file, 'w') as f:
+            f.write('\n'.join(self.debug_log))
+        
+        return pd.DataFrame(self.trades), pd.DataFrame(self.portfolio_history)
+    
+    def _execute_trades(self, index: int, positions_to_close: List[Tuple[Dict, str]], 
+                       new_position_btc: float, position_size_factor: float, position_direction: int):
+        """Execute buy/sell trades with net position readjustment logic"""
+        current_time = self.data.iloc[index]['timestamp']
+        current_price = self.data.iloc[index][self.price_col]
+        current_feature = self.data.iloc[index][self.feature_col]
+        
+        # Calculate current portfolio value before trades
+        portfolio_value = self._calculate_portfolio_value(current_price)
+        
+        # Log trade execution
+        self.debug_log.append(f"\nTrade execution at {current_time}:")
+        self.debug_log.append(f"Portfolio value before: {portfolio_value}")
+        self.debug_log.append(f"Cash before: {self.cash}")
+        self.debug_log.append(f"btc held before: {self.btc_held}")
+        self.debug_log.append(f"btc borrowed before: {self.btc_borrowed}")
+        
+        # --- Execute position closures first ---
+        total_long_closes = 0
+        total_short_closes = 0
+        
+        for pos, reason in positions_to_close:
+            btc_amount = pos['btc_amount']
+            pos_direction = pos.get('direction', 1)
+            
+            if btc_amount > 0:
+                if pos_direction == 1:  # Closing long position
+                    # Sell btc
+                    transaction_cost = btc_amount * current_price * self.config.transaction_cost
+                    proceeds = btc_amount * current_price - transaction_cost
+                    self.cash += proceeds
+                    self.btc_held -= btc_amount
+                    total_long_closes += btc_amount
+                    
+                else:  # Closing short position (direction == -1)
+                    # Buy btc to cover
+                    cost_to_cover = btc_amount * current_price
+                    transaction_cost = cost_to_cover * self.config.transaction_cost
+                    total_cost = cost_to_cover + transaction_cost
+                    
+                    if total_cost > self.cash:
+                        # Can't afford full cover, scale down
+                        affordable_amount = self.cash / (current_price * (1 + self.config.transaction_cost))
+                        btc_amount = min(btc_amount, affordable_amount)
+                        cost_to_cover = btc_amount * current_price
+                        transaction_cost = cost_to_cover * self.config.transaction_cost
+                        total_cost = cost_to_cover + transaction_cost
+                    
+                    self.cash -= total_cost
+                    self.btc_borrowed -= btc_amount
+                    total_short_closes += btc_amount
+        
+        # --- Execute new position opening ---
+        if new_position_btc > 1e-9:
+            if position_direction == 1:  # Opening long position
+                required_cash = new_position_btc * current_price * (1 + self.config.transaction_cost)
+                
+                if required_cash > self.cash:
+                    # Adjust size if insufficient cash
+                    if self.cash > 0:
+                        new_position_btc = self.cash / (current_price * (1 + self.config.transaction_cost))
+                    else:
+                        new_position_btc = 0
+                
+                if new_position_btc > 1e-9:
+                    transaction_cost = new_position_btc * current_price * self.config.transaction_cost
+                    self.cash -= (new_position_btc * current_price + transaction_cost)
+                    self.btc_held += new_position_btc
+                    
+            else:  # Opening short position (direction == -1)
+                # For shorts, we don't need additional collateral checks since position sizing
+                # is already based on true equity, not inflated portfolio value
+                if new_position_btc > 1e-9:
+                    transaction_cost = new_position_btc * current_price * self.config.transaction_cost
+                    proceeds_from_short = new_position_btc * current_price - transaction_cost
+                    self.cash += proceeds_from_short
+                    self.btc_borrowed += new_position_btc
+        
+        # --- Determine trade types for logging ---
+        if total_long_closes > 0 and total_short_closes > 0:
+            trade_type = "MIXED_CLOSE"
+        elif total_long_closes > 0:
+            trade_type = "SELL" if new_position_btc < 1e-9 else "NET_SELL"
+        elif total_short_closes > 0:
+            trade_type = "COVER" if new_position_btc < 1e-9 else "NET_COVER"
+        elif new_position_btc > 1e-9:
+            trade_type = "SHORT" if position_direction == -1 else "BUY"
+        else:
+            trade_type = "NO_TRADE"
+        
+        # --- Calculate closed position details for logging ---
+        closed_positions_details = []
+        for pos, reason in positions_to_close:
+            btc_amount = pos['btc_amount']
+            pos_direction = pos.get('direction', 1)
+            
+            if btc_amount > 0:
+                # Calculate profit/loss based on position direction
+                if pos_direction == 1:  # Long position
+                    profit_loss_pct = (current_price - pos['entry_price']) / pos['entry_price'] if pos['entry_price'] > 0 else 0
+                    profit_loss_usd = btc_amount * (current_price - pos['entry_price'])
+                else:  # Short position (direction == -1)
+                    profit_loss_pct = (pos['entry_price'] - current_price) / pos['entry_price'] if pos['entry_price'] > 0 else 0
+                    profit_loss_usd = btc_amount * (pos['entry_price'] - current_price)
+                
+                hold_time_hours = (current_time - pos['entry_time']).total_seconds() / 3600
+                
+                closed_positions_details.append({
+                    'id': pos['id'],
+                    'entry_time': pos['entry_time'],
+                    'entry_price': pos['entry_price'],
+                    'entry_feature': pos['entry_feature'],
+                    'btc_amount': btc_amount,
+                    'direction': pos_direction,
+                    'profit_loss_pct': profit_loss_pct,
+                    'profit_loss_usd': profit_loss_usd,
+                    'hold_time_hours': hold_time_hours,
+                    'exit_reason': reason,
+                    'size_factor': pos['size_factor']
+                })
+        
+        # --- Create readjustment notes ---
+        readjustment_note = None
+        if positions_to_close and new_position_btc > 1e-9:
+            closed_info_str = ", ".join([
+                f"ID {c['id']} ({c['exit_reason']}, {'+' if c['profit_loss_usd'] >= 0 else ''}"
+                f"${c['profit_loss_usd']:.2f})"
+                for c in closed_positions_details
+            ])
+            open_type = "SHORT" if position_direction == -1 else "LONG"
+            readjustment_note = f"Readjustment: Closing {closed_info_str}; Opening new {open_type} position: {new_position_btc:.8f} btc"
+        elif positions_to_close:
+            closed_info_str = ", ".join([
+                f"ID {c['id']} ({c['exit_reason']}, {'+' if c['profit_loss_usd'] >= 0 else ''}"
+                f"${c['profit_loss_usd']:.2f})"
+                for c in closed_positions_details
+            ])
+            readjustment_note = f"Closing {closed_info_str}"
+        elif new_position_btc > 1e-9:
+            open_type = "SHORT" if position_direction == -1 else "LONG"
+            readjustment_note = f"Opening new {open_type} position: {new_position_btc:.8f} btc"
+        
+        # Ensure non-negative balances
+        self.cash = max(0, self.cash)
+        self.btc_held = max(0, self.btc_held)
+        self.btc_borrowed = max(0, self.btc_borrowed)
+        
+        # --- Log Trades ---
+        # Log new position opening
+        if new_position_btc > 1e-9:
+            position = self.position_manager.open_position(
+                current_time, current_price, current_feature, new_position_btc, position_size_factor, position_direction
+            )
+            
+            # Determine trade type and transaction cost
+            if position_direction == 1:
+                log_trade_type = "BUY"
+                transaction_cost = new_position_btc * current_price * self.config.transaction_cost
+            else:
+                log_trade_type = "SHORT" 
+                transaction_cost = new_position_btc * current_price * self.config.transaction_cost
+            
+            self.trades.append({
+                'timestamp': current_time,
+                'price': current_price,
+                'trade_type': log_trade_type,
+                'trade_id': position['id'],
+                'btc_amount': new_position_btc,
+                'usd_amount': new_position_btc * current_price,
+                'portfolio_value': portfolio_value,
+                'cash': self.cash,
+                'btc_held': self.btc_held,
+                'btc_borrowed': self.btc_borrowed,
+                'position_direction': position_direction,
+                'feature_value': current_feature,
+                'size_factor': position_size_factor,
+                'transaction_cost': transaction_cost,
+                'entry_time': None,
+                'entry_price': None,
+                'entry_feature': None,
+                'profit_loss_pct': None,
+                'profit_loss_usd': None,
+                'hold_time_hours': None,
+                'exit_reason': None,
+                'readjustment_note': readjustment_note if len(closed_positions_details) == 1 else None
+            })
+        
+        # Log position closures
+        for closed_info in closed_positions_details:
+            position_dir = closed_info['direction']
+            
+            # Determine trade type and transaction cost
+            if position_dir == 1:
+                log_trade_type = "SELL"
+                transaction_cost = closed_info['btc_amount'] * current_price * self.config.transaction_cost
+            else:
+                log_trade_type = "COVER"
+                transaction_cost = closed_info['btc_amount'] * current_price * self.config.transaction_cost
+            
+            self.trades.append({
+                'timestamp': current_time,
+                'price': current_price,
+                'trade_type': log_trade_type,
+                'trade_id': closed_info['id'],
+                'btc_amount': closed_info['btc_amount'],
+                'usd_amount': closed_info['btc_amount'] * current_price,
+                'portfolio_value': portfolio_value,
+                'cash': self.cash,
+                'btc_held': self.btc_held,
+                'btc_borrowed': self.btc_borrowed,
+                'position_direction': position_dir,
+                'feature_value': current_feature,
+                'size_factor': closed_info['size_factor'],
+                'transaction_cost': transaction_cost,
+                'entry_time': closed_info['entry_time'],
+                'entry_price': closed_info['entry_price'],
+                'entry_feature': closed_info['entry_feature'],
+                'profit_loss_pct': closed_info['profit_loss_pct'],
+                'profit_loss_usd': closed_info['profit_loss_usd'],
+                'hold_time_hours': closed_info['hold_time_hours'],
+                'exit_reason': closed_info['exit_reason'],
+                'readjustment_note': readjustment_note if len(closed_positions_details) == 1 else None
+            })
+        
+        # Update position tracking - remove closed positions from manager
+        self.position_manager.close_positions(positions_to_close)
+    
+    def _calculate_true_equity(self, current_price: float) -> float:
+        """Calculate true equity (not inflated by short sale proceeds)"""
+        # True equity = What we'd have if we closed all positions right now
+        # This equals: cash + long_value - short_liability
+        equity = self.cash
+        equity += self.btc_held * current_price  # Long positions value
+        equity -= self.btc_borrowed * current_price  # Short positions liability
+        
+        return max(0, equity)  # Can't have negative equity
+    
+    def _calculate_portfolio_value(self, current_price: float) -> float:
+        """Calculate portfolio value including long and short positions"""
+        # Start with cash (which includes proceeds from short sales)
+        portfolio_value = self.cash
+        
+        # Add value of long positions
+        portfolio_value += self.btc_held * current_price
+        
+        # Subtract liability from short positions (btc we owe at current price)
+        # This is the cost to cover all borrowed btc at current market price
+        if self.btc_borrowed > 0:
+            short_liability = self.btc_borrowed * current_price
+            portfolio_value -= short_liability
+        
+        return portfolio_value
+    
+    def _apply_borrowing_costs(self, current_time: datetime):
+        """Apply hourly borrowing costs to short positions"""
+        if self.btc_borrowed <= 0:
+            return
+            
+        if self.last_borrowing_cost_time is None:
+            self.last_borrowing_cost_time = current_time
+            return
+        
+        # Calculate hours since last borrowing cost application
+        hours_elapsed = (current_time - self.last_borrowing_cost_time).total_seconds() / 3600
+        
+        if hours_elapsed >= 1.0:  # Apply costs every hour
+            # Calculate borrowing cost in USD
+            # Use current btc price to convert borrowing rate to USD
+            current_price = self.data[self.data['timestamp'] == current_time][self.price_col].iloc[0]
+            borrowing_cost_btc = self.btc_borrowed * self.borrowing_rate_hourly * hours_elapsed
+            borrowing_cost_usd = borrowing_cost_btc * current_price
+            
+            # Deduct borrowing cost from cash
+            self.cash -= borrowing_cost_usd
+            
+            # Log borrowing cost (optional, for tracking)
+            self.debug_log.append(f"Borrowing cost applied: {borrowing_cost_usd:.4f} USD for {self.btc_borrowed:.6f} btc over {hours_elapsed:.2f} hours")
+            
+            self.last_borrowing_cost_time = current_time
+    
+    def _record_portfolio_state(self, index: int):
+        """Record current portfolio state"""
+        current_time = self.data.iloc[index]['timestamp']
+        current_price = self.data.iloc[index][self.price_col]
+        current_feature = self.data.iloc[index][self.feature_col]
+        
+        portfolio_value = self._calculate_portfolio_value(current_price)
+        btc_value = self.btc_held * current_price
+        btc_allocation = (btc_value / portfolio_value) * 100 if portfolio_value > 0 else 0
+        
+        # Calculate short position metrics
+        short_value = 0
+        short_allocation = 0
+        if self.btc_borrowed > 0:
+            # For shorts, the "value" is the unrealized P&L impact
+            short_positions = [pos for pos in self.position_manager.positions if pos.get('direction', 1) == -1]
+            if short_positions:
+                total_borrowed_value = sum(pos['btc_amount'] * pos['entry_price'] for pos in short_positions)
+                weighted_avg_short_entry = total_borrowed_value / self.btc_borrowed if self.btc_borrowed > 0 else 0
+                short_pnl = self.btc_borrowed * (weighted_avg_short_entry - current_price)
+                short_value = abs(self.btc_borrowed * current_price)  # Notional value of short position
+                short_allocation = (short_value / portfolio_value) * 100 if portfolio_value > 0 else 0
+        
+        self.portfolio_history.append({
+            'timestamp': current_time,
+            'portfolio_value': portfolio_value,
+            'cash': self.cash,
+            'btc_held': self.btc_held,
+            'btc_borrowed': self.btc_borrowed,
+            'btc_value': btc_value,
+            'short_value': short_value,
+            'btc_allocation': btc_allocation,
+            'short_allocation': short_allocation,
+            'feature_value': current_feature,
+            'price': current_price
+        })
+
+    def _calculate_available_equity_for_sizing(self, current_price: float) -> float:
+        """
+        Calculate equity available for position sizing.
+        Simple approach: limit total notional exposure to prevent excessive leverage
+        """
+        # Calculate current notional exposure from short positions
+        current_short_exposure = self.btc_borrowed * current_price
+        
+        # Maximum allowed total exposure (e.g., 2x initial capital for conservative leverage)
+        max_total_exposure = self.config.initial_portfolio * self.config.leverage_multiplier
+        
+        # Available equity = initial capital if under exposure limit
+        if current_short_exposure < max_total_exposure:
+            # Still have room for more positions
+            remaining_exposure_capacity = max_total_exposure - current_short_exposure
+            available_equity = min(self.config.initial_portfolio, remaining_exposure_capacity)
+        else:
+            # Already at or over exposure limit - no new positions
+            available_equity = self.config.initial_portfolio * 0.1  # Minimal amount
+        
+        return max(self.config.initial_portfolio * 0.1, available_equity)

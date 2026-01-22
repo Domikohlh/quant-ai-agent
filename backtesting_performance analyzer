@@ -1,0 +1,197 @@
+class PerformanceAnalyzer:
+    """Analyzes backtest performance metrics"""
+    
+    def __init__(self, config: BacktestConfig):
+        self.config = config
+    
+    def calculate_metrics(self, trades_df: pd.DataFrame, portfolio_df: pd.DataFrame) -> Dict:
+        """Calculate all performance metrics"""
+        if portfolio_df.empty or len(portfolio_df) < 2:
+            return {}
+        
+        metrics = {}
+        
+        # Basic returns
+        initial_value = self.config.initial_portfolio
+        final_value = portfolio_df['portfolio_value'].iloc[-1]
+        metrics['total_return'] = (final_value - initial_value) / initial_value
+        metrics['total_return_pct'] = metrics['total_return'] * 100
+        
+        # Time-based returns
+        start_date = portfolio_df['timestamp'].iloc[0]
+        end_date = portfolio_df['timestamp'].iloc[-1]
+        years = max(1.0, (end_date - start_date).days) / 365.25
+        metrics['annualized_return'] = ((1 + metrics['total_return']) ** (1 / years)) - 1 if metrics['total_return'] > -1 else -1
+        metrics['annualized_return_pct'] = metrics['annualized_return'] * 100
+        
+        # Sharpe ratio
+        metrics['sharpe_ratio'] = self._calculate_sharpe_ratio(portfolio_df)
+        
+        # Drawdown
+        portfolio_df['drawdown'] = 1 - portfolio_df['portfolio_value'] / portfolio_df['portfolio_value'].cummax()
+        metrics['max_drawdown'] = portfolio_df['drawdown'].max()
+        metrics['max_drawdown_pct'] = metrics['max_drawdown'] * 100
+        
+        # Trade analysis
+        if not trades_df.empty:
+            # Include both long and short closing trades
+            sell_trades = trades_df[trades_df['trade_type'].isin(['SELL', 'NET_SELL', 'EXACT_BALANCE', 'COVER', 'NET_COVER'])].dropna(subset=['profit_loss_pct'])
+            
+            if not sell_trades.empty:
+                metrics['total_trades'] = len(sell_trades)
+                metrics['win_count'] = len(sell_trades[sell_trades['profit_loss_pct'] > 0])
+                metrics['win_rate'] = metrics['win_count'] / metrics['total_trades'] * 100
+                
+                # Calculate profit factor
+                sell_trades_pnl = sell_trades.dropna(subset=['profit_loss_usd'])
+                if not sell_trades_pnl.empty:
+                    profits = sell_trades_pnl[sell_trades_pnl['profit_loss_usd'] > 0]['profit_loss_usd'].sum()
+                    losses = abs(sell_trades_pnl[sell_trades_pnl['profit_loss_usd'] < 0]['profit_loss_usd'].sum())
+                    metrics['profit_factor'] = profits / losses if losses > 0 else (profits if profits > 0 else 0)
+                else:
+                    metrics['profit_factor'] = 0
+                
+                # Exit reason analysis
+                exit_counts = sell_trades['exit_reason'].value_counts()
+                metrics['time_limit_exits'] = exit_counts.get('TIME_LIMIT', 0)
+                metrics['feature_exits'] = exit_counts.get('FEATURE_EXIT', 0)
+                metrics['stop_loss_exits'] = exit_counts.get('STOP_LOSS', 0)
+                metrics['take_profit_exits'] = exit_counts.get('TAKE_PROFIT', 0)
+                
+                # Count combined exit reasons (e.g., "TIME_LIMIT+STOP_LOSS")
+                combined_exits = 0
+                for reason in exit_counts.index:
+                    if '+' in str(reason):
+                        combined_exits += exit_counts[reason]
+                metrics['combined_exits'] = combined_exits
+                
+                # Trade type analysis
+                long_trades = sell_trades[sell_trades['trade_type'].isin(['SELL', 'NET_SELL'])]
+                short_trades = sell_trades[sell_trades['trade_type'].isin(['COVER', 'NET_COVER'])]
+                
+                metrics['long_trades'] = len(long_trades)
+                metrics['short_trades'] = len(short_trades)
+                
+                if len(long_trades) > 0:
+                    metrics['long_win_rate'] = len(long_trades[long_trades['profit_loss_pct'] > 0]) / len(long_trades) * 100
+                    metrics['long_avg_return'] = long_trades['profit_loss_pct'].mean() * 100
+                else:
+                    metrics['long_win_rate'] = 0
+                    metrics['long_avg_return'] = 0
+                    
+                if len(short_trades) > 0:
+                    metrics['short_win_rate'] = len(short_trades[short_trades['profit_loss_pct'] > 0]) / len(short_trades) * 100
+                    metrics['short_avg_return'] = short_trades['profit_loss_pct'].mean() * 100
+            else:
+                metrics['total_trades'] = 0
+                metrics['win_rate'] = 0
+        
+        # Portfolio allocation
+        metrics['mean_btc_allocation'] = portfolio_df['btc_allocation'].mean()
+        metrics['max_btc_allocation'] = portfolio_df['btc_allocation'].max()
+        
+        # Transaction costs and volume analysis
+        if not trades_df.empty:
+            metrics['total_transaction_cost'] = trades_df['transaction_cost'].sum()
+            metrics['total_buy_amount'] = trades_df[trades_df['trade_type'].isin(['BUY', 'NET_BUY'])]['usd_amount'].sum()
+            metrics['total_sell_amount'] = trades_df[trades_df['trade_type'].isin(['SELL', 'NET_SELL'])]['usd_amount'].sum()
+        else:
+            metrics['total_transaction_cost'] = 0
+            metrics['total_buy_amount'] = 0
+            metrics['total_sell_amount'] = 0
+        
+        # Backtest period
+        metrics['start_date'] = start_date
+        metrics['end_date'] = end_date
+        metrics['duration_days'] = (end_date - start_date).days
+        
+        return metrics
+    
+    def _calculate_sharpe_ratio(self, portfolio_df: pd.DataFrame) -> float:
+        """Calculate Sharpe ratio using weekly returns"""
+        # Group by week
+        portfolio_df['week'] = portfolio_df['timestamp'].dt.isocalendar().week
+        portfolio_df['year'] = portfolio_df['timestamp'].dt.isocalendar().year
+        
+        weekly_portfolio = portfolio_df.groupby(['year', 'week'])['portfolio_value'].last().reset_index()
+        
+        if len(weekly_portfolio) > 1:
+            weekly_portfolio['return'] = weekly_portfolio['portfolio_value'].pct_change()
+            weekly_returns = weekly_portfolio['return'].dropna()
+            
+            if weekly_returns.std() != 0 and not np.isnan(weekly_returns.std()):
+                excess_returns = weekly_returns - (self.config.risk_free_rate / 52)
+                return np.sqrt(52) * excess_returns.mean() / excess_returns.std()
+        
+        return 0.0
+    
+    def generate_summary(self, metrics: Dict) -> str:
+        """Generate performance summary text"""
+        summary = f"""
+        =======================================================================
+        PERFORMANCE SUMMARY - {self.config.output_prefix}
+        =======================================================================
+
+        Strategy Parameters:
+        - Trading Mode: {self.config.trading_mode.upper()}
+        - Feature Type: {self.config.feature_type}
+        - Feature Lag Periods: {self.config.feature_lag_periods}
+        - Entry Threshold: {self.config.entry_threshold} ({self.config.entry_direction})
+        - Exit Threshold: {self.config.exit_threshold} ({self.config.exit_direction})
+        - Max Hold Hours: {self.config.max_hold_hours}
+        - Base Position Size: {self.config.base_position_size * 100:.2f}%
+        - Leverage: {self.config.leverage_multiplier:.1f}x
+        - Transaction Cost: {self.config.transaction_cost * 100:.3f}%
+        {"- Borrowing Rate: " + f"{self.config.borrowing_rate_annual * 100:.2f}%" + " annual" if self.config.trading_mode == "short_only" else ""}
+        - Stop Loss: {'Enabled' if self.config.stop_loss_enabled else 'Disabled'} ({self.config.stop_loss_percentage * 100:.1f}% if enabled)
+        - Take Profit: {'Enabled' if self.config.take_profit_enabled else 'Disabled'} ({self.config.take_profit_percentage * 100:.1f}% if enabled)
+
+        Performance Metrics:
+        - Initial Portfolio Value: ${self.config.initial_portfolio:,.2f}
+        - Final Portfolio Value: ${self.config.initial_portfolio * (1 + metrics.get('total_return', 0)):,.2f}
+        - Total Return: {metrics.get('total_return_pct', 0):.2f}%
+        - Annualized Return: {metrics.get('annualized_return_pct', 0):.2f}%
+        - Sharpe Ratio: {metrics.get('sharpe_ratio', 0):.2f}
+        - Maximum Drawdown: {metrics.get('max_drawdown_pct', 0):.2f}%
+
+        Trade Analysis:
+        - Number of Trades: {metrics.get('total_trades', 0)}
+        - Win Rate: {metrics.get('win_rate', 0):.2f}%
+        {"- Long Trades: " + f"{metrics.get('long_trades', 0)}" + f" (Win Rate: {metrics.get('long_win_rate', 0):.1f}%)" if metrics.get('long_trades', 0) > 0 else ""}
+        {"- Short Trades: " + f"{metrics.get('short_trades', 0)}" + f" (Win Rate: {metrics.get('short_win_rate', 0):.1f}%)" if metrics.get('short_trades', 0) > 0 else ""}
+        - Mean Hold Time: {metrics.get('mean_hold_time', 0):.2f} hours
+        - Median Hold Time: {metrics.get('median_hold_time', 0):.2f} hours
+
+        Exit Analysis:
+        - Time Limit Exits: {metrics.get('time_limit_exits', 0)} ({metrics.get('time_limit_pct', 0):.2f}%)
+        - Feature Exit ({self.config.feature_type.upper()} {self.config.exit_direction} {self.config.exit_threshold}): {metrics.get('feature_exits', 0)} ({metrics.get('feature_exit_pct', 0):.2f}%)
+        - Time Limit Exit Win Rate: {metrics.get('time_limit_win_rate', 0):.2f}%
+        - Feature Exit Win Rate: {metrics.get('feature_exit_win_rate', 0):.2f}%
+        - Stop Loss Exits: {metrics.get('stop_loss_exits', 0)} ({metrics.get('stop_loss_pct', 0):.2f}%)
+        - Stop Loss Win Rate: {metrics.get('stop_loss_win_rate', 0):.2f}%
+        - Take Profit Exits: {metrics.get('take_profit_exits', 0)} ({metrics.get('take_profit_pct', 0):.2f}%)
+        - Take Profit Win Rate: {metrics.get('take_profit_win_rate', 0):.2f}%
+
+        Signal Strength Analysis:
+        - MODERATE Win Rate: {metrics.get('moderate_win_rate', 0):.2f}%
+        - STRONG Win Rate: {metrics.get('strong_win_rate', 0):.2f}%
+
+        Position Sizing Analysis:
+        - Mean Position Size Factor: {metrics.get('mean_position_factor', 0):.2f}x
+        - Median Position Size Factor: {metrics.get('median_position_factor', 0):.2f}x
+        - Mean btc Allocation: {metrics.get('mean_btc_allocation', 0):.2f}%
+        - Maximum btc Allocation: {metrics.get('max_btc_allocation', 0):.2f}%
+
+        Cost Analysis:
+        - Total Transaction Cost: ${metrics.get('total_transaction_cost', 0):,.2f}
+        - Total Buy Amount: ${metrics.get('total_buy_amount', 0):,.2f}
+        - Total Sell Amount: ${metrics.get('total_sell_amount', 0):,.2f}
+
+        Backtest Period:
+        - Start Date: {metrics.get('start_date', 'N/A')}
+        - End Date: {metrics.get('end_date', 'N/A')}
+        - Duration: {metrics.get('duration_days', 0)} days
+
+        =======================================================================
+        """
+        return summary

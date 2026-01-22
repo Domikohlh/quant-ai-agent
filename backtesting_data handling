@@ -1,0 +1,341 @@
+class DataHandler:
+    """Handles data loading and merging"""
+    
+    def __init__(self, config: BacktestConfig):
+        self.config = config
+        self.merged_data = None
+        self.feature_column = None
+        self.price_column = None
+    
+    def load_and_merge(self) -> pd.DataFrame:
+        """Load price and feature data, merge on timestamp"""
+        print(f"Loading price data from {self.config.price_file}...")
+        price_data = self._load_csv(self.config.price_file)
+        
+        print(f"Loading feature data from {self.config.feature_file}...")
+        feature_data = self._load_csv(self.config.feature_file)
+        
+        # Detect feature column
+        self.feature_column = self._detect_feature_column(feature_data)
+        feature_data = feature_data[['timestamp', self.feature_column]]
+        
+        # Ensure consistent timestamp handling
+        price_data['timestamp'] = pd.to_datetime(price_data['timestamp'])
+        feature_data['timestamp'] = pd.to_datetime(feature_data['timestamp'])
+        
+        # Sort by timestamp to ensure consistent merging
+        price_data = price_data.sort_values('timestamp')
+        feature_data = feature_data.sort_values('timestamp')
+
+        # Ensure consistent data types before merging
+        price_data = price_data.astype({col: 'float64' for col in price_data.columns if col != 'timestamp'})
+        feature_data = feature_data.astype({col: 'float64' for col in feature_data.columns if col != 'timestamp'})
+        
+        # Apply feature lagging if specified
+        if self.config.feature_lag_periods > 0:
+            print(f"Applying {self.config.feature_lag_periods} period lag to feature data...")
+            # Shift all feature columns (except timestamp) forward by the specified number of periods
+            # This creates a lag effect where feature[t] now represents the value from feature[t-lag]
+            feature_columns = [col for col in feature_data.columns if col != 'timestamp']
+            for col in feature_columns:
+                feature_data[col] = feature_data[col].shift(self.config.feature_lag_periods)
+            # Remove rows with NaN values created by the shift
+            feature_data = feature_data.dropna()
+            print(f"Lagged columns: {feature_columns}")
+            print(f"Feature data after lagging: {len(feature_data)} rows remaining")
+        
+        # Merge data
+        print("Merging data...")
+        self.merged_data = pd.merge_asof(price_data, feature_data, on='timestamp')
+        
+        # Handle missing and infinite values consistently
+        self.merged_data[self.feature_column] = self.merged_data[self.feature_column].replace([np.inf, -np.inf], np.nan)
+        self.merged_data = self.merged_data.ffill()
+        
+        # Detect price column
+        self.price_column = self._detect_price_column(self.merged_data)
+        
+        # Final cleanup
+        self.merged_data = self.merged_data.ffill()
+        self.merged_data = self.merged_data.dropna()
+        
+        # Ensure consistent data types
+        self.merged_data = self.merged_data.astype({
+            self.feature_column: 'float64',
+            self.price_column: 'float64'
+        })
+        
+        print(f"Data merged successfully. Rows: {len(self.merged_data)}")
+        return self.merged_data
+    
+    def _load_csv(self, filepath: str) -> pd.DataFrame:
+        """Load CSV and standardize timestamp column"""
+        df = pd.read_csv(filepath)
+        
+        # Find and rename timestamp column
+        timestamp_col = None
+        for col in df.columns:
+            if 'time' in col.lower() or 'date' in col.lower():
+                timestamp_col = col
+                break
+        
+        if timestamp_col is None:
+            timestamp_col = df.columns[0]
+        
+        df = df.rename(columns={timestamp_col: 'timestamp'})
+        
+        # Try to detect date format by examining the first few non-null timestamp values
+        sample_dates = df['timestamp'].dropna().head(10).astype(str).tolist()
+        date_format = self.config.date_format  # Use config format if specified
+        
+        # If no format specified in config, try to auto-detect
+        if date_format is None:
+            # Common date formats to try
+            date_formats = [
+                '%Y-%m-%d %H:%M:%S',  # 2019-11-01 00:00:00
+                '%Y-%m-%d',           # 2019-11-01
+                '%d/%m/%Y %H:%M',     # 17/07/2010 23:00 (DD/MM/YYYY HH:MM)
+                '%d/%m/%Y %H:%M:%S',  # 01/11/2019 00:00:00 (DD/MM/YYYY)
+                '%m/%d/%Y %H:%M:%S',  # 11/01/2019 00:00:00 (MM/DD/YYYY)
+                '%d/%m/%Y',           # 01/11/2019 (DD/MM/YYYY)
+                '%m/%d/%Y',           # 11/01/2019 (MM/DD/YYYY)
+                '%Y/%m/%d %H:%M:%S',  # 2019/11/01 00:00:00
+                '%Y/%m/%d',           # 2019/11/01
+                '%d-%m-%Y %H:%M:%S',  # 01-11-2019 00:00:00
+                '%m-%d-%Y %H:%M:%S',  # 11-01-2019 00:00:00
+                '%d-%m-%Y',           # 01-11-2019
+                '%m-%d-%Y',           # 11-01-2019
+            ]
+            
+            # Try each format and see which one works consistently
+            for fmt in date_formats:
+                try:
+                    # Try parsing all sample dates with this format
+                    parsed_dates = []
+                    for date_str in sample_dates:
+                        parsed_dates.append(pd.to_datetime(date_str, format=fmt))
+                    
+                    # If all samples parsed successfully, use this format
+                    date_format = fmt
+                    print(f"Detected date format: {fmt}")
+                    break
+                except:
+                    continue
+        
+        # Parse timestamps with detected format or let pandas infer
+        if date_format:
+            df['timestamp'] = pd.to_datetime(df['timestamp'], format=date_format)
+        else:
+            # If no format detected, use dayfirst setting from config
+            df['timestamp'] = pd.to_datetime(df['timestamp'], dayfirst=self.config.dayfirst)
+            print(f"Warning: Could not detect specific date format. Using pandas inference with dayfirst={self.config.dayfirst}")
+        
+        # Verify dates are reasonable (should be between 2010 and 2030 for crypto data)
+        min_date = df['timestamp'].min()
+        max_date = df['timestamp'].max()
+        if min_date.year < 2010 or max_date.year > 2030:
+            print(f"Warning: Unusual date range detected: {min_date} to {max_date}")
+            print("This might indicate a date parsing issue.")
+        
+        df = df.sort_values('timestamp')
+        
+        # Debug output
+        print(f"Loaded {filepath}:")
+        print(f"  Date range: {min_date} to {max_date}")
+        print(f"  Number of rows: {len(df)}")
+        
+        return df
+    
+    def _detect_feature_column(self, df: pd.DataFrame) -> str:
+        timestamp_cols = ['timestamp', 'time', 'date']
+        excluded_cols = ['price', 'close']  # Don't use price data as feature
+        potential_cols = [col for col in df.columns if col.lower() not in timestamp_cols + excluded_cols]
+
+        if self.config.feature_column and self.config.feature_column in df.columns:
+            return self.config.feature_column
+
+        if len(potential_cols) == 1:
+            return potential_cols[0]
+
+        for col in potential_cols:
+            if self.config.feature_type and self.config.feature_type.lower() in col.lower():
+                return col
+
+        return potential_cols[0] if potential_cols else None
+
+    
+    def _detect_price_column(self, df: pd.DataFrame) -> str:
+        """Detect the price column from dataframe"""
+        for col in df.columns:
+            if 'price' in col.lower() or 'close' in col.lower():
+                return col
+        
+        # Default to second column if not found
+        non_timestamp_cols = [col for col in df.columns if col != 'timestamp']
+        return non_timestamp_cols[0] if non_timestamp_cols else None
+
+
+class PositionManager:
+    """Manages position sizing and tracking"""
+    
+    def __init__(self, config: BacktestConfig):
+        self.config = config
+        self.positions = []
+        self.trade_id_counter = 0
+    
+    def calculate_position_size_factor(self, feature_value: float) -> float:
+        """Calculate position size factor using sigmoid function"""
+        # Check if feature value meets entry criteria
+        if self.config.entry_direction == "above":
+            if feature_value <= self.config.entry_threshold:
+                return 0.0
+        else:  # below
+            if feature_value >= self.config.entry_threshold:
+                return 0.0
+        
+        # Normalize feature value based on entry direction
+        if self.config.entry_direction == "above":
+            # For "above" entries: higher values = stronger signal
+            normalized = (feature_value - self.config.entry_threshold) / (self.config.sigmoid_midpoint - self.config.entry_threshold)
+        else:  # below
+            # For "below" entries: lower values = stronger signal
+            normalized = (self.config.entry_threshold - feature_value) / (self.config.entry_threshold - self.config.sigmoid_midpoint)
+        
+        # Apply sigmoid with fixed precision
+        try:
+            exponent = float(self.config.sigmoid_steepness * (normalized - 1))
+            exponent = max(-700, min(700, exponent))  # Prevent overflow
+            sigmoid_value = float(1 / (1 + np.exp(-exponent)))
+        except:
+            sigmoid_value = 0.99 if normalized > 1 else 0.01
+        
+        # Scale to desired range with fixed precision
+        factor = float(self.config.min_position_factor + sigmoid_value * (self.config.max_position_factor - self.config.min_position_factor))
+        
+        # Ensure final value is within bounds with fixed precision
+        return float(max(self.config.min_position_factor, min(self.config.max_position_factor, factor)))
+    
+    def open_position(self, timestamp: datetime, price: float, feature_value: float, btc_amount: float, size_factor: float, direction: int = 1) -> Dict:
+        """Open a new position with direction support"""
+        self.trade_id_counter += 1
+        position = {
+            'id': self.trade_id_counter,
+            'entry_time': timestamp,
+            'entry_price': price,
+            'entry_feature': feature_value,
+            'btc_amount': btc_amount,
+            'size_factor': size_factor,
+            'direction': direction  # 1 for long, -1 for short
+        }
+        self.positions.append(position)
+        return position
+    
+    def check_exit_conditions(self, timestamp: datetime, feature_value: float, current_price: float) -> List[Tuple[Dict, str]]:
+        """Check which positions should be closed based on exit conditions"""
+        positions_to_close = []
+
+        for pos in self.positions:
+            exit_reasons = []
+            
+            # Check max hold time
+            hold_time = (timestamp - pos['entry_time']).total_seconds() / 3600
+            if hold_time >= self.config.max_hold_hours:
+                exit_reasons.append("TIME_LIMIT")
+    
+            # Check feature exit condition based on direction
+            if self.config.exit_direction == "above":
+                if feature_value > self.config.exit_threshold:
+                    exit_reasons.append("FEATURE_EXIT")
+            else:  # below
+                if feature_value < self.config.exit_threshold:
+                    exit_reasons.append("FEATURE_EXIT")
+            
+            # Check stop loss and take profit based on position direction
+            if current_price > 0 and pos['entry_price'] > 0:
+                position_direction = pos.get('direction', 1)  # Default to long if not specified
+                
+                # Calculate price change percentage from entry price
+                price_change_pct = (current_price - pos['entry_price']) / pos['entry_price']
+                
+                if position_direction == 1:  # Long position
+                    # Check stop loss
+                    if self.config.stop_loss_enabled and price_change_pct <= self.config.stop_loss_percentage:
+                        exit_reasons.append("STOP_LOSS")
+                    
+                    # Check take profit
+                    if self.config.take_profit_enabled and price_change_pct >= self.config.take_profit_percentage:
+                        exit_reasons.append("TAKE_PROFIT")
+                        
+                else:  # Short position (direction == -1)
+                    # For shorts: price going up is bad (stop loss), price going down is good (take profit)
+                    # Check stop loss (price increase hurts short positions)
+                    if self.config.stop_loss_enabled and price_change_pct >= abs(self.config.stop_loss_percentage):
+                        exit_reasons.append("STOP_LOSS")
+                    
+                    # Check take profit (price decrease helps short positions)
+                    if self.config.take_profit_enabled and price_change_pct <= -self.config.take_profit_percentage:
+                        exit_reasons.append("TAKE_PROFIT")
+            
+            # If any exit conditions are met, add to positions to close
+            if exit_reasons:
+                combined_reason = "+".join(exit_reasons)
+                positions_to_close.append((pos, combined_reason))
+
+        return positions_to_close
+
+    
+    def close_positions(self, positions_to_close: List[Tuple[Dict, str]]):
+        """Remove closed positions from tracking"""
+        closed_ids = {pos[0]['id'] for pos in positions_to_close}
+        self.positions = [pos for pos in self.positions if pos['id'] not in closed_ids]
+    
+    def calibrate_sigmoid(self, feature_values: np.ndarray):
+        """Calibrate sigmoid parameters for target mean position size"""
+        # Filter values based on entry direction
+        if self.config.entry_direction == "above":
+            valid_values = feature_values[feature_values > self.config.entry_threshold]
+        else:  # below
+            valid_values = feature_values[feature_values < self.config.entry_threshold]
+        
+        if len(valid_values) == 0:
+            return
+    
+        # Set initial midpoint based on entry direction
+        if self.config.entry_direction == "above":
+            # For "above" entries: use 75th percentile as midpoint
+            self.config.sigmoid_midpoint = np.percentile(valid_values, 75)
+        else:  # below
+            # For "below" entries: use 25th percentile as midpoint
+            self.config.sigmoid_midpoint = np.percentile(valid_values, 25)
+        
+        # Ensure minimum distance from entry threshold
+        if abs(self.config.sigmoid_midpoint - self.config.entry_threshold) < 0.001:
+            if self.config.entry_direction == "above":
+                self.config.sigmoid_midpoint = self.config.entry_threshold + 0.001
+            else:
+                self.config.sigmoid_midpoint = self.config.entry_threshold - 0.001
+        
+        # Calculate mean factor and adjust
+        attempts = 0
+        while attempts < 10:
+            factors = [self.calculate_position_size_factor(v) for v in valid_values]
+            current_mean = np.mean(factors)
+            
+            if abs(current_mean - self.config.target_mean_factor) < 0.1:
+                break
+            
+            # Adjust midpoint based on entry direction
+            if self.config.entry_direction == "above":
+                if current_mean < self.config.target_mean_factor:
+                    self.config.sigmoid_midpoint *= 0.9
+                else:
+                    self.config.sigmoid_midpoint *= 1.1
+            else:  # below
+                if current_mean < self.config.target_mean_factor:
+                    self.config.sigmoid_midpoint *= 1.1
+                else:
+                    self.config.sigmoid_midpoint *= 0.9
+            
+            attempts += 1
+        
+        print(f"Calibrated sigmoid: midpoint={self.config.sigmoid_midpoint:.4f}")
