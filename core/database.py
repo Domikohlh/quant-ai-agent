@@ -1,0 +1,164 @@
+# core/database.py
+import os
+import logging
+
+from google.cloud import bigquery
+from google.cloud import firestore
+from google.cloud.sql.connector import Connector
+import sqlalchemy
+from sqlalchemy import text
+
+logger = logging.getLogger(__name__)
+
+class DatabaseManager:
+    def __init__(self, project_id: str, region: str, sql_instance_name: str, sql_db_name: str):
+        self.project_id = project_id
+        self.region = region
+        
+        # 1. BigQuery Client (Market Data)
+        self.bq_client = bigquery.Client(project=project_id)
+        
+        # 2. Firestore Client (Agent Thoughts)
+        self.firestore_client = firestore.Client(project=project_id)
+        
+        # 3. Cloud SQL Connection (Transactions)
+        self.sql_instance = sql_instance_name # Format: "project:region:instance"
+        self.sql_db = sql_db_name
+        self.sql_connector = Connector()
+        self.pool = self._init_sql_pool()
+
+    def _init_sql_pool(self):
+        """Creates a SQLAlchemy pool using the Cloud SQL Connector."""
+        def getconn():
+            conn = self.sql_connector.connect(
+                self.sql_instance,
+                "pg8000",
+                user=os.environ.get("DB_USER"),
+                password=os.environ.get("DB_PASS"),
+                db=self.sql_db
+            )
+            return conn
+
+        return sqlalchemy.create_engine(
+            "postgresql+pg8000://",
+            creator=getconn,
+        )
+
+    # --- Helper: Save Market Data ---
+    def save_market_data(self, df, table_id="market_data.history"):
+        """Saves a Pandas DataFrame to BigQuery."""
+        job_config = bigquery.LoadJobConfig(
+            write_disposition="WRITE_APPEND",
+            schema_update_options=[
+                bigquery.SchemaUpdateOption.ALLOW_FIELD_ADDITION
+            ]
+        )
+        
+        # 2. Upload
+        job = self.bq_client.load_table_from_dataframe(
+            df, f"{self.project_id}.{table_id}", job_config=job_config
+        )
+        job.result()  # Wait for completion
+        logger.info("Loaded %s rows to BigQuery: %s", len(df), table_id)
+
+    # --- Helper: Save Agent Log ---
+    def log_agent_thought(self, thought_data: dict):
+        """Saves a dictionary (from AgentThought model) to Firestore."""
+        doc_ref = self.firestore_client.collection("agent_logs").document()
+        doc_ref.set(thought_data)
+        logger.info("Logged agent thought: %s", doc_ref.id)
+
+    # --- Helper: Save Transaction ---
+    def save_transaction(self, transaction_data: dict):
+        """Saves a trade to PostgreSQL."""
+        # Note: In production, use ORM like SQLAlchemy Session. Here is raw SQL for clarity.
+        stmt = text("""
+            INSERT INTO transactions (order_id, agent_id, symbol, side, quantity, price, status, timestamp)
+            VALUES (:order_id, :agent_id, :symbol, :side, :quantity, :price, :status, :timestamp)
+        """)
+        with self.pool.connect() as db_conn:
+            db_conn.execute(stmt, transaction_data)
+            db_conn.commit()
+        logger.info("Saved transaction: %s", transaction_data.get("order_id"))
+
+    def create_tables(self):
+        """Creates the necessary tables if they don't exist."""
+        # Define the SQL schema
+        create_transactions_table = text("""
+            CREATE TABLE IF NOT EXISTS transactions (
+                order_id VARCHAR(50) PRIMARY KEY,
+                agent_id VARCHAR(50),
+                symbol VARCHAR(10),
+                side VARCHAR(10),
+                quantity DECIMAL,
+                price DECIMAL,
+                status VARCHAR(20),
+                timestamp TIMESTAMP,
+                fees DECIMAL DEFAULT 0.0
+            );
+        """)
+        
+        # Execute it
+        with self.pool.connect() as db_conn:
+            db_conn.execute(create_transactions_table)
+            db_conn.commit()
+        logger.info("Tables verified/created successfully.")
+    
+    # Add to core/database.py inside DatabaseManager class
+
+    def get_latest_record_info(self, table_id: str, ticker: str):
+        """
+        Inspects the BigQuery table to find the date column name and the 
+        latest timestamp for the given ticker.
+        
+        Returns:
+            tuple: (latest_date, date_column_name)
+            - latest_date: datetime object or None if no data exists.
+            - date_column_name: str (e.g., 'Date', 'timestamp', 'datetime')
+        """
+        try:
+            full_table_id = f"{self.project_id}.{table_id}"
+            table = self.bq_client.get_table(full_table_id)
+            
+            # 1. Dynamically find the date/timestamp column
+            # We look for standard names or a specific type if needed.
+            schema_field_names = [field.name for field in table.schema]
+            
+            # Priority check for common time column names
+            date_col = None
+            for candidate in ["timestamp", "Date", "datetime", "t"]:
+                if candidate in schema_field_names:
+                    date_col = candidate
+                    break
+            
+            if not date_col:
+                # Fallback: Assume the schema mismatch error implies 'Date' is likely there 
+                # if 'timestamp' failed. Or just pick the first TIMESTAMP field.
+                for field in table.schema:
+                    if field.field_type in ["TIMESTAMP", "DATE", "DATETIME"]:
+                        date_col = field.name
+                        break
+            
+            # If still None, we can't do incremental load safely.
+            if not date_col:
+                logger.warning(f"Could not identify a date column in {table_id}. Schema: {schema_field_names}")
+                return None, "timestamp" # Default fallback
+
+            # 2. Query for the latest date
+            query = f"""
+                SELECT MAX({date_col}) as max_date 
+                FROM `{full_table_id}` 
+                WHERE ticker = @ticker
+            """
+            job_config = bigquery.QueryJobConfig(
+                query_parameters=[bigquery.ScalarQueryParameter("ticker", "STRING", ticker)]
+            )
+            
+            result = self.bq_client.query(query, job_config=job_config).result()
+            row = next(result)
+            return row.max_date, date_col
+
+        except Exception as e:
+            # If table doesn't exist or other error, return None to trigger full load
+            logger.warning(f"Could not fetch latest record: {e}")
+            return None, "timestamp"

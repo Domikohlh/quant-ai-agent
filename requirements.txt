@@ -17,7 +17,14 @@ yfinance
 pytz 
 fastmcp
 uv
-pandas
 google-genai
 google-adk
+
+#New Requirements
+google-cloud-bigquery
+google-cloud-firestore
+cloud-sql-python-connector
+sqlalchemy
+pg8000
+pandas-gbq
 

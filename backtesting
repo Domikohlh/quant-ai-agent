@@ -1,5 +1,5 @@
 class BacktestConfig:
-    """ Configuration container for backtest parameters ""
+    """ Configuration container for backtest parameters """
     def __init__(self):
         # File paths - auto-detect files in the current directory
         self.price_file = None # DONT CHANGE
