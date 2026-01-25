@@ -19,6 +19,7 @@ fastmcp
 uv
 google-genai
 google-adk
+requests
 
 #New Requirements
 google-cloud-bigquery

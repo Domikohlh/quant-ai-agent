@@ -51,7 +51,7 @@ async def main():
 
     connection_params = StdioConnectionParams(
         server_params=server_params,
-        timeout=10,)
+        timeout=30,)
     # 2. Initialize Toolset
     # This automatically "glues" the MCP server tools to the Gemini client
     toolset = McpToolset(
@@ -68,7 +68,7 @@ async def main():
     print(f"✅ Client initialized for Vertex AI Project: {PROJECT_ID}")
 
     model_id = "gemini-3-flash-preview" 
-    user_query = "Analyze NVDA technicals (1mo, 1h). I specifically need MACD (12,26,9) and VWAP data. If there is an error, state the error message."
+    user_query = "Analyze NVDA technicals (1y, 1h). I specifically need MACD (12,26,9) and VWAP data. Combine with the macroeconomic of US, such as GDP and PPI, and recent new sentiment. See if NVDA is at a good buying opportunity. If there is an error encountered, state the error message."
 
     print(f"\n🗣️  User Query: {user_query}")
     print("-" * 50)
@@ -80,7 +80,7 @@ async def main():
         model=model,
         name="quant_agent",
         instruction="You are a professional Quantitative Analyst. Your job is to fetch technical indicators and summarize them for a trader.",
-        tools=[toolset]
+        tools=[toolset],
     )
     
     runner = InMemoryRunner(agent=agent)

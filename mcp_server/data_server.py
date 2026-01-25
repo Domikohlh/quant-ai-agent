@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 import json
+import requests
 
 import pandas as pd
 import yfinance as yf
@@ -110,7 +111,7 @@ def _validate_stock_params(ticker: str, period: str, interval: str) -> None:
 # --- 3. The Tools ---
 
 @mcp.tool()
-def update_stock_data(ticker: str, period: str = "1mo", interval: str = "1h") -> str:
+def update_stock_data(ticker: str, period: str = "1y", interval: str = "1h") -> str:
     """
     Downloads stock data from YFinance, calculates Technical Indicators (RSI, MACD, SMA),
     and saves the stock + technical data to BigQuery.
@@ -408,6 +409,89 @@ def update_macro_data(series_id: str = "GDP") -> str:
         
     except Exception as e:
         return f"❌ Error fetching FRED data: {e}"
+
+@mcp.tool()
+def search_financial_news(query: str, count: int = 5) -> str:
+    """
+    Searches high-trust financial news sources (Bloomberg, Reuters, WSJ, etc.) 
+    using the Brave Search API. Use this for sentiment analysis and macro news.
+    
+    Args:
+        query: The search topic (e.g., "NVDA institutional sentiment", "US GDP forecast")
+        count: Number of results to return (default 5, max 20)
+    """
+    api_key = os.getenv("BRAVE_API_KEY")
+    if not api_key:
+        return "Error: BRAVE_API_KEY not found in environment variables."
+
+    # 1. Define Trust Filter
+    # We use the 'site:' operator to force the engine to only look at these domains.
+    trusted_domains = [
+        "bloomberg.com",
+        "reuters.com",
+        "wsj.com",
+        "cnbc.com",
+        "ft.com",
+        "barrons.com",
+        "marketwatch.com",
+        "theinformation.com"
+    ]
+    
+    # Construct the OR filter: (site:bloomberg.com OR site:reuters.com ...)
+    site_filter = " OR ".join([f"site:{d}" for d in trusted_domains])
+    final_query = f"{query} ({site_filter})"
+    
+    logger.info(f"Searching Brave with query: {final_query}")
+
+    # 2. Call Brave Search API
+    url = "https://api.search.brave.com/res/v1/web/search"
+    headers = {
+        "Accept": "application/json",
+        "Accept-Encoding": "gzip",
+        "X-Subscription-Token": api_key
+    }
+    params = {
+        "q": final_query,
+        "count": count,
+        "search_lang": "en",
+        "text_decorations": 0, # Turn off bolding tags
+        "snippet_length": 150  # Get decent context for the LLM
+    }
+
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=10)
+        
+        if response.status_code == 429:
+            return "Error: Brave API rate limit exceeded."
+        if response.status_code != 200:
+            return f"Error: Brave API returned status {response.status_code}"
+
+        data = response.json()
+        
+        # 3. Format Results for the LLM
+        # We only want the high-value bits: Title, Link, Description, and Age (if available)
+        web_results = data.get("web", {}).get("results", [])
+        
+        if not web_results:
+            return f"No results found for '{query}' on trusted financial sites."
+
+        formatted_results = []
+        for i, item in enumerate(web_results, 1):
+            title = item.get("title", "No Title")
+            url = item.get("url", "#")
+            desc = item.get("description", "No description.")
+            # Age is useful for sentiment (e.g., "2 hours ago")
+            age = item.get("age", "Unknown date") 
+            
+            formatted_results.append(
+                f"{i}. [{title}]({url})\n   Date: {age}\n   Summary: {desc}"
+            )
+
+        return "\n\n".join(formatted_results)
+
+    except Exception as e:
+        logger.error(f"Error executing Brave search: {e}")
+        return f"Error executing search: {str(e)}"
 
 # --- 4. Running the Server ---
 if __name__ == "__main__":
