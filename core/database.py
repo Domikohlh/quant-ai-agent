@@ -47,6 +47,24 @@ class DatabaseManager:
     # --- Helper: Save Market Data ---
     def save_market_data(self, df, table_id="market_data.history"):
         """Saves a Pandas DataFrame to BigQuery."""
+        dataset_id = table_id.split('.')[0]  # Extracts "market_data"
+        full_dataset_id = f"{self.project_id}.{dataset_id}"
+        
+        # We explicitly enforce 'us-central1' for storage, regardless of where the Agent runs.
+        # You can also load this from os.getenv("BQ_LOCATION", "us-central1")
+        STORAGE_LOCATION = "us-central1" 
+        
+        dataset_ref = bigquery.Dataset(full_dataset_id)
+        dataset_ref.location = STORAGE_LOCATION
+        
+        try:
+            # exists_ok=True ensures this never crashes. 
+            # If the folder was deleted 5 seconds ago, this line instantly recreates it.
+            self.bq_client.create_dataset(dataset_ref, exists_ok=True)
+        except Exception as e:
+            # Log warning but try to proceed (sometimes permissions invoke false negatives)
+            logger.warning(f"Dataset check/creation note: {e}")
+
         job_config = bigquery.LoadJobConfig(
             write_disposition="WRITE_APPEND",
             schema_update_options=[
