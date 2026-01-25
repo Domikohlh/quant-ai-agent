@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Optional
 import json
 import requests
+from datetime import timedelta
 
 import pandas as pd
 import yfinance as yf
@@ -220,6 +221,7 @@ def update_stock_data(ticker: str, period: str = "1y", interval: str = "1h") -> 
         }
     """
     try:
+        # 1. Initial Validation (Your Structure)
         _validate_stock_params(ticker=ticker, period=period, interval=interval)
         safe_ticker = _sanitize_ticker(ticker)
         
@@ -227,59 +229,58 @@ def update_stock_data(ticker: str, period: str = "1y", interval: str = "1h") -> 
         table_id = os.getenv("BQ_TECH_TABLE_ID", "market_data.processed_tech_indicators")
         db = _get_db()
         
-        # 1. Check BigQuery state
+        # 2. Check BigQuery state
         last_date, bq_date_col = db.get_latest_record_info(table_id, safe_ticker)
         
-        # 2. Adjust download parameters based on existing data
-        yf_start = None
+        df = pd.DataFrame()
+        
+        # 3. Decide Download Strategy
         if last_date:
             logger.info(f"Found existing data for {safe_ticker} up to {last_date}. Switching to incremental load.")
-            # Set start date to the last known date (YF will usually handle overlaps, 
-            # but we can filter strictly later)
-            yf_start = last_date
-            # If we are doing incremental, we ignore 'period' and use 'start'
-            # However, YF requires we don't mix period and start/end in some versions.
-            # Safe bet: If we have a start date, use it.
             
-        logger.info(f"Fetching stock data ticker={safe_ticker} start={yf_start} period={period}")
-
-        # 3. Download Data
-        if yf_start:
-            # Fetch slightly more to ensure indicator calculation continuity (e.g. need previous rows for SMA)
-            # But for pure data appending, we just want new rows.
-            # *Critical Note*: Calculating indicators (RSI/MACD) requires historical context.
-            # If you download ONLY new days, your RSI for the first new row will be NaN.
-            # Intelligent Fix: We must download `start` = last_date - buffer (e.g. 60 days) 
-            # then filter the RESULT to only keep rows > last_date before saving.
-            
+            # Intelligent Buffer: We fetch 30 days PRIOR to last_date to ensure indicators (MACD/RSI) 
+            # have enough "warmup" data to be accurate.
             from datetime import timedelta
-            buffer_days = 60 # Enough for SMA 50, roughly enough for EMA convergence
+            import pytz
+            
+            # Ensure last_date is timezone-aware for math
+            if isinstance(last_date, str):
+                last_date = pd.to_datetime(last_date)
+            if last_date.tzinfo is None:
+                 last_date = last_date.replace(tzinfo=pytz.UTC)
+                 
+            buffer_days = 30 
             buffered_start = last_date - timedelta(days=buffer_days)
+            
+            # Use 'start' instead of 'period' to target the gap
             df = yf.download(safe_ticker, start=buffered_start, interval=interval, auto_adjust=True, progress=False)
+            
         else:
+            logger.info(f"Fetching full stock data ticker={safe_ticker} period={period}")
             df = yf.download(safe_ticker, period=period, interval=interval, auto_adjust=True, progress=False)
 
         if df.empty:
             return f"Error: No data found for {safe_ticker}."
 
-        # Flatten columns if MultiIndex
+        # Flatten columns if MultiIndex (Fix for recent YFinance versions)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
         # 4. Calculate Indicators (Requires the buffer data!)
-        import pandas_ta as ta  # noqa: F401
-        df.ta.rsi(append=True)
-        df.ta.macd(fast=12, slow=26, signal=9, append=True)
-        df.ta.macd(fast=10, slow=24, signal=7, append=True)
-        df.ta.macd(fast=5, slow=13, signal=4, append=True)
-        df.ta.sma(length=50, append=True)
-        df.ta.sma(length=200, append=True)
-        df.ta.bbands(append=True)
-        df.ta.atr(length=14, append=True)
-        if 'Volume' in df.columns:
-            df.ta.vwap(append=True)
+        import pandas_ta as ta
+        if len(df) > 50:
+            df.ta.rsi(append=True)
+            df.ta.macd(fast=12, slow=26, signal=9, append=True)
+            df.ta.macd(fast=10, slow=24, signal=7, append=True)
+            df.ta.macd(fast=5, slow=13, signal=4, append=True)
+            df.ta.sma(length=50, append=True)
+            df.ta.sma(length=200, append=True)
+            df.ta.bbands(append=True)
+            df.ta.atr(length=14, append=True)
+            if 'Volume' in df.columns:
+                df.ta.vwap(append=True)
 
-        # 5. Dynamic Schema Alignment (The "Follow BigQuery" Fix)
+        # 5. Dynamic Schema Alignment
         df.reset_index(inplace=True)
         
         # Identify the DF's time column
@@ -290,8 +291,7 @@ def update_stock_data(ticker: str, period: str = "1y", interval: str = "1h") -> 
                 break
         
         if df_time_col:
-            # RENAME the DF column to match BigQuery's column name (bq_date_col)
-            # This prevents the "Schema does not match" error.
+            # RENAME to standardized 'timestamp' for DB
             df.rename(columns={df_time_col: bq_date_col}, inplace=True)
         
         # Standardize other columns
@@ -303,63 +303,50 @@ def update_stock_data(ticker: str, period: str = "1y", interval: str = "1h") -> 
         df["ticker"] = safe_ticker
         df["source"] = "YFINANCE"
 
-        # 6. Filter Overlaps (Crucial for Incremental Load)
-        if last_date:
-            # Convert both to timezone-naive or aware for comparison to avoid errors
-            # Assuming BQ returns timezone aware, make sure DF is compatible
-            if pd.api.types.is_datetime64_any_dtype(df[bq_date_col]):
-                 # Keep only strictly new data
-                 df = df[df[bq_date_col] > last_date]
-        
-        df.dropna(inplace=True)
-
-        # 7. Store
-        final_df = None
+        # 6. Filter Overlaps & Save
         rows_added = 0
+        final_df = None
 
-        if not df.empty:
-            # Case A: We have new data. Save it, and use IT for the response.
-            # No need to query BigQuery again.
+        if last_date:
+            # We downloaded a buffer (old data). We must DROP it before saving.
+            # Convert DF date to TZ-aware if needed
+            if df[bq_date_col].dt.tz is None:
+                 df[bq_date_col] = df[bq_date_col].dt.tz_localize('UTC')
+            
+            # Filter: Keep only strictly NEW data
+            new_data_mask = df[bq_date_col] > last_date
+            df_to_save = df.loc[new_data_mask].copy()
+            
+            if not df_to_save.empty:
+                db.save_market_data(df_to_save, table_id=table_id)
+                rows_added = len(df_to_save)
+                # Return tail of new data for context
+                final_df = df_to_save.tail(100)
+            else:
+                logger.info("No new data found after forward-fill.")
+                final_df = df.tail(5) # Just show what we have
+        else:
+            # Initial Load - Save Everything
             db.save_market_data(df, table_id=table_id)
             rows_added = len(df)
-            logger.info(f"Appended {rows_added} new rows to BigQuery.")
-            
-            # Use the data we already have in memory!
             final_df = df.copy()
-        
-        else:
-            # Case B: No new data. We MUST query BigQuery to get context.
-            logger.info("No new data to append. Fetching context from DB.")
-            
-            query = f"""
-                SELECT *
-                FROM `{db.project_id}.{table_id}`
-                WHERE ticker = @ticker
-                ORDER BY {bq_date_col} DESC
-                LIMIT 5
-            """
-            job_config = bigquery.QueryJobConfig(
-                query_parameters=[bigquery.ScalarQueryParameter("ticker", "STRING", safe_ticker)]
-            )
-            final_df = db.bq_client.query(query, job_config=job_config).to_dataframe()
 
+        # 7. Construct Response
         if final_df is None or final_df.empty:
              return json.dumps({"status": "error", "message": "Data processed but could not be retrieved."})
 
-        # Sort for the Agent (Oldest -> Newest)
-        # Ensure we use the correct date column name we discovered earlier
+        # Ensure sorted
         if bq_date_col in final_df.columns:
             final_df.sort_values(by=bq_date_col, ascending=True, inplace=True)
-            latest_date = str(final_df[bq_date_col].max())
+            latest_date_str = str(final_df[bq_date_col].max())
         else:
-            # Fallback if column missing in returned data
-            latest_date = "Unknown"
+            latest_date_str = "Unknown"
 
         response_data = {
             "status": "success",
             "ticker": safe_ticker,
             "rows_added": rows_added,
-            "latest_data_date": latest_date,
+            "latest_data_date": latest_date_str,
             "columns": final_df.columns.tolist(),
             "sample_data": json.loads(final_df.tail(5).to_json(orient="records", date_format="iso"))
         }
