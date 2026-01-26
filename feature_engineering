@@ -33,33 +33,6 @@ class ZScore:
         return f'zscore_{self.window}'
 
 
-class BollingerBands:
-    """Calculate Bollinger Bands metrics"""
-    def __init__(self, window: int = 20, num_std: int = 2, metric: str = 'bandwidth'):
-        self.window = window
-        self.num_std = num_std
-        self.metric = metric
-    
-    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
-        feature_name = df.columns[1]
-        rolling_mean = df[feature_name].rolling(window=self.window).mean()
-        rolling_std = df[feature_name].rolling(window=self.window).std()
-        
-        upper_band = rolling_mean + (rolling_std * self.num_std)
-        lower_band = rolling_mean - (rolling_std * self.num_std)
-        
-        result = pd.DataFrame()
-        result['timestamp'] = df['timestamp']
-        
-        if self.metric == 'bandwidth':
-            result['bb_bandwidth'] = (upper_band - lower_band) / rolling_mean
-        else:  # percent_b
-            result['bb_percent_b'] = (df[feature_name] - lower_band) / (upper_band - lower_band)
-        
-        return result.dropna()
-    
-    def get_name(self) -> str:
-        return f'bb_{self.metric}'
 
 
 class ThresholdCrossing:
@@ -99,84 +72,6 @@ class ThresholdCrossing:
         return f'threshold_{self.direction}_cross'
 
 
-class RSI:
-    """Calculate Relative Strength Index"""
-    def __init__(self, window: int = 14):
-        self.window = window
-    
-    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
-        feature_name = df.columns[1]
-        
-        # Calculate price changes
-        delta = df[feature_name].diff()
-        gains = delta.where(delta > 0, 0)
-        losses = -delta.where(delta < 0, 0)
-        
-        # Calculate average gains and losses
-        avg_gains = gains.rolling(window=self.window).mean()
-        avg_losses = losses.rolling(window=self.window).mean()
-        
-        # Calculate RSI
-        rs = avg_gains / avg_losses
-        rsi = 100 - (100 / (1 + rs))
-        
-        result = pd.DataFrame()
-        result['timestamp'] = df['timestamp']
-        result[f'{feature_name}_rsi_{self.window}'] = rsi
-        return result.dropna()
-    
-    def get_name(self) -> str:
-        return f'rsi_{self.window}'
-
-
-class MACD:
-    """Calculate MACD (Moving Average Convergence Divergence)"""
-    def __init__(self, fast_window: int = 12, slow_window: int = 26, signal_window: int = 9):
-        self.fast_window = fast_window
-        self.slow_window = slow_window
-        self.signal_window = signal_window
-    
-    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
-        feature_name = df.columns[1]
-        
-        # Calculate EMAs
-        ema_fast = df[feature_name].ewm(span=self.fast_window).mean()
-        ema_slow = df[feature_name].ewm(span=self.slow_window).mean()
-        
-        # Calculate MACD line
-        macd_line = ema_fast - ema_slow
-        
-        # Calculate signal line
-        signal_line = macd_line.ewm(span=self.signal_window).mean()
-        
-        # Calculate histogram
-        histogram = macd_line - signal_line
-        
-        # Return dictionary with separate components
-        results = {}
-        
-        # MACD Line
-        line_df = pd.DataFrame()
-        line_df['timestamp'] = df['timestamp']
-        line_df[f'{feature_name}_macd_line_{self.fast_window}_{self.slow_window}_{self.signal_window}'] = macd_line
-        results['line'] = line_df.dropna()
-        
-        # MACD Signal
-        signal_df = pd.DataFrame()
-        signal_df['timestamp'] = df['timestamp']
-        signal_df[f'{feature_name}_macd_signal_{self.fast_window}_{self.slow_window}_{self.signal_window}'] = signal_line
-        results['signal'] = signal_df.dropna()
-        
-        # MACD Histogram
-        histogram_df = pd.DataFrame()
-        histogram_df['timestamp'] = df['timestamp']
-        histogram_df[f'{feature_name}_macd_histogram_{self.fast_window}_{self.slow_window}_{self.signal_window}'] = histogram
-        results['histogram'] = histogram_df.dropna()
-        
-        return results
-    
-    def get_name(self) -> str:
-        return f'macd_{self.fast_window}_{self.slow_window}_{self.signal_window}'
 
 
 class TRIX:
