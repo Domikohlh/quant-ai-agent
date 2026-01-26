@@ -1,19 +1,3 @@
-class RateOfChange:
-    """Calculate Rate of Change"""
-    def __init__(self, periods: int):
-        self.periods = periods
-    
-    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
-        feature_name = df.columns[1]
-        result = pd.DataFrame()
-        result['timestamp'] = df['timestamp']
-        result[f'{feature_name}_{self.periods}h_roc'] = df[feature_name].pct_change(self.periods) * 100
-        return result.dropna()
-    
-    def get_name(self) -> str:
-        return f'{self.periods}h_roc'
-
-
 class ZScore:
     """Calculate rolling Z-score"""
     def __init__(self, window: int):
@@ -31,101 +15,6 @@ class ZScore:
     
     def get_name(self) -> str:
         return f'zscore_{self.window}'
-
-
-
-
-class ThresholdCrossing:
-    """Detect threshold crossings"""
-    def __init__(self, window: int = 168, percentile_low: int = 20, 
-                 percentile_high: int = 80, direction: str = 'low'):
-        self.window = window
-        self.percentile_low = percentile_low
-        self.percentile_high = percentile_high
-        self.direction = direction
-    
-    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
-        feature_name = df.columns[1]
-        result = pd.DataFrame()
-        result['timestamp'] = df['timestamp']
-        
-        if self.direction == 'low':
-            threshold = df[feature_name].rolling(window=self.window).apply(
-                lambda x: np.percentile(x, self.percentile_low)
-            )
-            result['threshold_low_cross'] = (
-                (df[feature_name] <= threshold) & 
-                (df[feature_name].shift(1) > threshold)
-            ).astype(int)
-        else:  # 'high'
-            threshold = df[feature_name].rolling(window=self.window).apply(
-                lambda x: np.percentile(x, self.percentile_high)
-            )
-            result['threshold_high_cross'] = (
-                (df[feature_name] >= threshold) & 
-                (df[feature_name].shift(1) < threshold)
-            ).astype(int)
-        
-        return result.dropna()
-    
-    def get_name(self) -> str:
-        return f'threshold_{self.direction}_cross'
-
-
-
-
-class TRIX:
-    """Calculate TRIX (Triple Exponential Average)"""
-    def __init__(self, window: int = 14):
-        self.window = window
-    
-    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
-        feature_name = df.columns[1]
-        
-        # Calculate triple exponential smoothing
-        ema1 = df[feature_name].ewm(span=self.window).mean()
-        ema2 = ema1.ewm(span=self.window).mean()
-        ema3 = ema2.ewm(span=self.window).mean()
-        
-        # Calculate TRIX as percentage change of EMA3
-        trix = ema3.pct_change() * 100
-        
-        result = pd.DataFrame()
-        result['timestamp'] = df['timestamp']
-        result[f'{feature_name}_trix_{self.window}'] = trix
-        return result.dropna()
-    
-    def get_name(self) -> str:
-        return f'trix_{self.window}'
-
-
-class MovingAverageOscillator:
-    """Calculate Moving Average Oscillator"""
-    def __init__(self, fast_window: int = 10, slow_window: int = 30, ma_type: str = 'sma'):
-        self.fast_window = fast_window
-        self.slow_window = slow_window
-        self.ma_type = ma_type  # 'sma' or 'ema'
-    
-    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
-        feature_name = df.columns[1]
-        
-        if self.ma_type == 'ema':
-            fast_ma = df[feature_name].ewm(span=self.fast_window).mean()
-            slow_ma = df[feature_name].ewm(span=self.slow_window).mean()
-        else:  # sma
-            fast_ma = df[feature_name].rolling(window=self.fast_window).mean()
-            slow_ma = df[feature_name].rolling(window=self.slow_window).mean()
-        
-        # Calculate oscillator
-        oscillator = fast_ma - slow_ma
-        
-        result = pd.DataFrame()
-        result['timestamp'] = df['timestamp']
-        result[f'{feature_name}_ma_osc_{self.fast_window}_{self.slow_window}'] = oscillator
-        return result.dropna()
-    
-    def get_name(self) -> str:
-        return f'ma_osc_{self.fast_window}_{self.slow_window}_{self.ma_type}'
 
 
 class MACDPercentagePriceOscillator:
@@ -173,6 +62,114 @@ class MACDPercentagePriceOscillator:
         results['histogram'] = histogram_df.dropna()
         
         return results
+
+
+class ThresholdCrossing:
+    """Detect threshold crossings"""
+    def __init__(self, window: int = 168, percentile_low: int = 20, 
+                 percentile_high: int = 80, direction: str = 'low'):
+        self.window = window
+        self.percentile_low = percentile_low
+        self.percentile_high = percentile_high
+        self.direction = direction
+    
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        feature_name = df.columns[1]
+        result = pd.DataFrame()
+        result['timestamp'] = df['timestamp']
+        
+        if self.direction == 'low':
+            threshold = df[feature_name].rolling(window=self.window).apply(
+                lambda x: np.percentile(x, self.percentile_low)
+            )
+            result['threshold_low_cross'] = (
+                (df[feature_name] <= threshold) & 
+                (df[feature_name].shift(1) > threshold)
+            ).astype(int)
+        else:  # 'high'
+            threshold = df[feature_name].rolling(window=self.window).apply(
+                lambda x: np.percentile(x, self.percentile_high)
+            )
+            result['threshold_high_cross'] = (
+                (df[feature_name] >= threshold) & 
+                (df[feature_name].shift(1) < threshold)
+            ).astype(int)
+        
+        return result.dropna()
+    
+    def get_name(self) -> str:
+        return f'threshold_{self.direction}_cross'
+
+
+class TRIX:
+    """Calculate TRIX (Triple Exponential Average)"""
+    def __init__(self, window: int = 14):
+        self.window = window
+    
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        feature_name = df.columns[1]
+        
+        # Calculate triple exponential smoothing
+        ema1 = df[feature_name].ewm(span=self.window).mean()
+        ema2 = ema1.ewm(span=self.window).mean()
+        ema3 = ema2.ewm(span=self.window).mean()
+        
+        # Calculate TRIX as percentage change of EMA3
+        trix = ema3.pct_change() * 100
+        
+        result = pd.DataFrame()
+        result['timestamp'] = df['timestamp']
+        result[f'{feature_name}_trix_{self.window}'] = trix
+        return result.dropna()
+    
+    def get_name(self) -> str:
+        return f'trix_{self.window}'
+
+
+class RateOfChange:
+    """Calculate Rate of Change"""
+    def __init__(self, periods: int):
+        self.periods = periods
+    
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        feature_name = df.columns[1]
+        result = pd.DataFrame()
+        result['timestamp'] = df['timestamp']
+        result[f'{feature_name}_{self.periods}h_roc'] = df[feature_name].pct_change(self.periods) * 100
+        return result.dropna()
+    
+    def get_name(self) -> str:
+        return f'{self.periods}h_roc'
+
+
+class MovingAverageOscillator:
+    """Calculate Moving Average Oscillator"""
+    def __init__(self, fast_window: int = 10, slow_window: int = 30, ma_type: str = 'sma'):
+        self.fast_window = fast_window
+        self.slow_window = slow_window
+        self.ma_type = ma_type  # 'sma' or 'ema'
+    
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        feature_name = df.columns[1]
+        
+        if self.ma_type == 'ema':
+            fast_ma = df[feature_name].ewm(span=self.fast_window).mean()
+            slow_ma = df[feature_name].ewm(span=self.slow_window).mean()
+        else:  # sma
+            fast_ma = df[feature_name].rolling(window=self.fast_window).mean()
+            slow_ma = df[feature_name].rolling(window=self.slow_window).mean()
+        
+        # Calculate oscillator
+        oscillator = fast_ma - slow_ma
+        
+        result = pd.DataFrame()
+        result['timestamp'] = df['timestamp']
+        result[f'{feature_name}_ma_osc_{self.fast_window}_{self.slow_window}'] = oscillator
+        return result.dropna()
+    
+    def get_name(self) -> str:
+        return f'ma_osc_{self.fast_window}_{self.slow_window}_{self.ma_type}'
+
     
     def get_name(self) -> str:
         return f'ppo_{self.fast_window}_{self.slow_window}_{self.signal_window}'
