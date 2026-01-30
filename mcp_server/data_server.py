@@ -7,6 +7,7 @@ from typing import Optional
 import json
 import requests
 from datetime import timedelta
+import numpy as np
 
 import pandas as pd
 import yfinance as yf
@@ -112,7 +113,7 @@ def _validate_stock_params(ticker: str, period: str, interval: str) -> None:
 # --- 3. The Tools ---
 
 @mcp.tool()
-def update_stock_data(ticker: str, period: str = "1y", interval: str = "1h") -> str:
+def update_stock_data(ticker: str, period: str = "2y", interval: str = "1h") -> str:
     """
     Downloads stock data from YFinance, calculates Technical Indicators (RSI, MACD, SMA),
     and saves the stock + technical data to BigQuery.
@@ -249,7 +250,7 @@ def update_stock_data(ticker: str, period: str = "1y", interval: str = "1h") -> 
             if last_date.tzinfo is None:
                  last_date = last_date.replace(tzinfo=pytz.UTC)
                  
-            buffer_days = 30 
+            buffer_days = 90 
             buffered_start = last_date - timedelta(days=buffer_days)
             
             # Use 'start' instead of 'period' to target the gap
@@ -279,6 +280,42 @@ def update_stock_data(ticker: str, period: str = "1y", interval: str = "1h") -> 
             df.ta.atr(length=14, append=True)
             if 'Volume' in df.columns:
                 df.ta.vwap(append=True)
+
+            # New technical indicators
+            df.ta.zscore(close=df['Close'], length=30, append=True)
+            df.ta.ppo(fast=12, slow=26, signal=9, append=True)
+            df['pct_rank_20'] = df['Close'].rolling(20).rank(pct=True)
+            df.ta.trix(length=30, append=True)
+            df.ta.roc(length=10, append=True)
+            df.ta.apo(fast=12, slow=26, append=True)
+
+            #Permutation
+            #Downcast 
+            float_cols = df.select_dtypes(include=['float64']).columns
+            df[float_cols]= df[float_cols].astype('float32')
+
+
+            raw_cols = {'timestamp', 'close', 'high', 'low', 'open', 'volume', 'ticker', 'source'}
+            tech_indicators = [c for c in df.columns if c not in raw_cols]
+            perm_windows = [1,3,6,12,24,36,48,72]
+
+            for col in tech_indicators:
+                for w in perm_windows:
+                    # 1. Momentum: The rate of change of the indicator
+                    # e.g., "Is RSI rising faster than usual?"
+                    df[f'{col}_diff_{w}'] = df[col].diff(w).astype('float32')
+                    
+                    # 2. Volatility: The stability of the indicator
+                    # e.g., "Is the MACD signal getting noisy/unstable?"
+                    df[f'{col}_vol_{w}'] = df[col].rolling(w).std().astype('float32')
+            
+            if df.isna().all().any():
+                df.dropna(axis=1, how='all', inplace=True)
+            
+            df.dropna(inplace=True)
+
+            if df.empty:
+             return json.dumps({"status": "error", "message": f"Insufficient data length. SMA_200 requires 200+ rows. Downloaded: {rows_added if 'rows_added' in locals() else 'unknown'}"})
 
         # 5. Dynamic Schema Alignment
         df.reset_index(inplace=True)

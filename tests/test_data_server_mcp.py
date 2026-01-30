@@ -68,7 +68,14 @@ async def main():
     print(f"✅ Client initialized for Vertex AI Project: {PROJECT_ID}")
 
     model_id = "gemini-3-flash-preview" 
-    user_query = "Analyze NVDA technicals (1y, 1h). I specifically need MACD (12,26,9) and VWAP data. Combine with the macroeconomic of US, such as GDP and PPI, and recent new sentiment. See if NVDA is at a good buying opportunity. At the end, you must state whether there is any error encountered."
+    user_query = """Analyze NVDA technicals (1y, 1h). 
+    I specifically need MACD (12,26,9) and VWAP data. 
+    Combine with the macroeconomic of US, such as GDP and PPI, and recent new sentiment. 
+    See if NVDA is at a good buying opportunity. 
+    See how many columns exist in the document.
+    At the end, you must state whether there is any error encountered. 
+    If an error is encountered, copy the exact error message. 
+    """
 
     print(f"\n🗣️  User Query: {user_query}")
     print("-" * 50)
