@@ -29,3 +29,7 @@ sqlalchemy
 pg8000
 pandas-gbq
 
+#Requirements for ML
+xgboost 
+scikit-learn
+scipy

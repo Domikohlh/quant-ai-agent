@@ -6,7 +6,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 
-# 1. Use the Unified SDK (Supports both API Key and Vertex AI)
+# 1. Google Agent + MCP tools
 from google import genai
 from google.adk.agents import LlmAgent
 from google.adk.models.google_llm import Gemini
@@ -15,6 +15,8 @@ from mcp import StdioServerParameters
 from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
 from google.adk.runners import InMemoryRunner
 from google.genai import types
+
+
 
 
 # --- Path & Env Setup ---
@@ -51,7 +53,7 @@ async def main():
 
     connection_params = StdioConnectionParams(
         server_params=server_params,
-        timeout=30,)
+        timeout=300,)
     # 2. Initialize Toolset
     # This automatically "glues" the MCP server tools to the Gemini client
     toolset = McpToolset(
@@ -68,13 +70,44 @@ async def main():
     print(f"✅ Client initialized for Vertex AI Project: {PROJECT_ID}")
 
     model_id = "gemini-3-flash-preview" 
-    user_query = """Analyze NVDA technicals (1y, 1h). 
-    I specifically need MACD (12,26,9) and VWAP data. 
-    Combine with the macroeconomic of US, such as GDP and PPI, and recent new sentiment. 
-    See if NVDA is at a good buying opportunity. 
-    See how many columns exist in the document.
-    At the end, you must state whether there is any error encountered. 
-    If an error is encountered, copy the exact error message. 
+    user_query = """
+
+    Task: Execute the following 2-step pipeline to retrain the model and evaluate if the signal-to-noise ratio has improved.
+
+    Step 1: Basket Feature Engineering (Triple Barrier) Call ml_feature_analysis with the following rigorous settings:
+
+    Target: NVDA
+
+    Basket: NVDA,AMD,INTC,MSFT,TSM (We want the model to learn general semiconductor/tech price physics).
+
+    Barrier Width: 1.0 (Target is a 1 standard deviation move).
+
+    Time Horizon: 5 (The move must happen within 5 bars).
+
+    Correlation Threshold: 0.85 (Remove redundant features).
+
+    Step 2: Train & Test Call ml_train_directional_model for NVDA.
+
+    Note: The tool will automatically detect and load the "Basket Train" and "Target Test" datasets created in Step 1.
+
+    Analysis Request: After training, compare the results to our previous baseline (which was ~50.4% Accuracy).
+
+    Did Accuracy improve? (We are looking for >53%).
+
+    Check the Precision: Is the model better at predicting "Up" moves (Class 1) specifically?
+
+    Feature Stability: Which features survived the selection process across the whole basket?
+
+    Explanation of the Strategy
+
+    Why these specific stocks? NVDA, AMD, INTC, and TSM share the same semiconductor supply chain cycle. MSFT represents the "AI demand" side.
+
+    Why Barrier 1.0 / Horizon 5? This filters out the "noise" (small 0.1% moves) that confused the previous model. We are telling the AI: "Only learn from moves that are statistically significant."
+    """
+
+    instruction = """
+    You are a Quantitative Researcher expertise in Machine learning. 
+    Your goal is to improve the directional prediction model for NVDA by moving from a single-stock approach to a "Sector-Aware" approach using the Triple Barrier Method
     """
 
     print(f"\n🗣️  User Query: {user_query}")
@@ -86,7 +119,7 @@ async def main():
     agent = LlmAgent(
         model=model,
         name="quant_agent",
-        instruction="You are a professional Quantitative Analyst. Your job is to fetch technical indicators and summarize them for a trader.",
+        instruction=instruction,
         tools=[toolset],
     )
     
