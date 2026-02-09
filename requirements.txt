@@ -11,7 +11,7 @@ ta                  # Technical Analysis library
 pydantic
 google-cloud-logging
 mcp                 # Model Context Protocol SDK
-pandas_ta
+pandas-ta
 fredapi
 yfinance
 pytz 
@@ -20,10 +20,12 @@ uv
 google-genai
 google-adk
 requests
+uvicorn
 
 #New Requirements
 google-cloud-bigquery
 google-cloud-firestore
+google-cloud-run
 cloud-sql-python-connector
 sqlalchemy
 pg8000
@@ -33,3 +35,4 @@ pandas-gbq
 xgboost 
 scikit-learn
 scipy
+joblib

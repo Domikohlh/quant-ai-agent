@@ -1,16 +1,29 @@
-# Use a lightweight Python image
-FROM python:3.11-slim
+# Use Python 3.12 (matches your local env)
+FROM python:3.12-slim
 
-# Set working directory
+# Install system dependencies (OpenMP for XGBoost)
+RUN apt-get update && apt-get install -y \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
-# Install dependencies
+# 1. Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
-COPY . .
+# 2. Copy the shared 'core' library
+COPY core/ core/
 
-# Set entrypoint
-# The port is handled by Cloud Run environment variable $PORT
-CMD exec uvicorn main:app --host 0.0.0.0 --port ${PORT}
+# 3. Copy the 'mcp_server' directory (where data_server.py lives)
+COPY mcp_server/ mcp_server/
+COPY helpers/ helpers/
+
+# 4. Copy .env to root (so both folders can find it easily)
+COPY .env . 
+
+# 5. Set PYTHONPATH so 'import core' and 'import mcp_server' work anywhere
+ENV PYTHONPATH=/app
+
+# 6. Default Command: Run the script from the mcp_server folder
+CMD ["python", "mcp_server/data_server.py"]

@@ -10,13 +10,11 @@ from dotenv import load_dotenv
 from google import genai
 from google.adk.agents import LlmAgent
 from google.adk.models.google_llm import Gemini
-from google.adk.tools.mcp_tool.mcp_session_manager import StdioConnectionParams
+from google.adk.tools.mcp_tool.mcp_session_manager import StdioConnectionParams, SseConnectionParams
 from mcp import StdioServerParameters
 from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
 from google.adk.runners import InMemoryRunner
 from google.genai import types
-
-
 
 
 # --- Path & Env Setup ---
@@ -28,7 +26,8 @@ load_dotenv(project_root / ".env")
 
 # Ensure GCP Project is set
 PROJECT_ID = os.getenv("GCP_PROJECT_ID")
-LOCATION = os.getenv("GCP_REGION", "global")
+LOCATION = os.getenv("GCP_AI_REGION", "global")
+DATA_SERVER_URL = os.getenv("DATA_SERVER_URL")
 
 if not server_script_path.exists():
     raise FileNotFoundError(f"Server script not found at: {server_script_path}")
@@ -44,20 +43,20 @@ os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "true"
 async def main():
     print(f"\n--- 🔌 Connecting to MCP Server: {server_script_path.name} ---")
     
-    # 1. Define Server Parameters (Runs your local python script)
-    server_params = StdioServerParameters(
-        command=sys.executable,
-        args=[str(server_script_path)],
-        env={**os.environ, "PYTHONUNBUFFERED": "1"}
-    )
+    connection_params = SseConnectionParams(
+    url=DATA_SERVER_URL, 
+    # Optional: Add headers if your server requires auth (e.g. Cloud Run)
+    headers={
+        "Authorization": "Bearer YOUR_TOKEN"
+    },
+    timeout=300
+)
 
-    connection_params = StdioConnectionParams(
-        server_params=server_params,
-        timeout=300,)
-    # 2. Initialize Toolset
-    # This automatically "glues" the MCP server tools to the Gemini client
+# 2. Initialize Toolset
+# This connects to the remote server via SSE instead of spawning a local process
     toolset = McpToolset(
-        connection_params=connection_params)
+        connection_params=connection_params
+    )
 
     # 3. Initialize Client in VERTEX AI Mode
     # setting vertexai=True tells the SDK to use your GCP Project Quota & Auth
@@ -72,46 +71,59 @@ async def main():
     model_id = "gemini-3-flash-preview" 
     user_query = """
 
-    Task: Execute the following 2-step pipeline to retrain the model and evaluate if the signal-to-noise ratio has improved.
+    Task: Execute the following 2-step pipeline to retrain the model for NVDA.
 
-    Step 1: Basket Feature Engineering (Triple Barrier) Call ml_feature_analysis with the following rigorous settings:
+    Strict Constraints:
+    1. Only use the tools provided. Do not hallucinate tool names.
+    2. If a tool fails, stop and report the exact error message.
+    3. If Step 1 fails, do NOT proceed to Step 2.
 
-    Target: NVDA
+    Step 1: Basket Feature Engineering
+    Call the tool `ml_feature_analysis` with these rigorous settings to generate the dataset:
+    - Target: "NVDA"
+    - Basket: "NVDA,AMD,INTC,MSFT,TSM" (Semiconductor supply chain & AI demand).
+    - Barrier Width: 1.0 (Targeting a 1 standard deviation move).
+    - Time Horizon: 5 (Move must happen within 5 bars).
+    - Top N: 15 (Keep top 15 features).
 
-    Basket: NVDA,AMD,INTC,MSFT,TSM (We want the model to learn general semiconductor/tech price physics).
+    Step 2: Train Model
+    Once Step 1 is confirmed successful, call `ml_train_basket_model`.
+    - Target: "NVDA"
+    - Run Remote: True
 
-    Barrier Width: 1.0 (Target is a 1 standard deviation move).
-
-    Time Horizon: 5 (The move must happen within 5 bars).
-
-    Correlation Threshold: 0.85 (Remove redundant features).
-
-    Step 2: Train & Test Call ml_train_directional_model for NVDA.
-
-    Note: The tool will automatically detect and load the "Basket Train" and "Target Test" datasets created in Step 1.
-
-    Analysis Request: After training, compare the results to our previous baseline (which was ~50.4% Accuracy).
-
-    Did Accuracy improve? (We are looking for >53%).
-
-    Check the Precision: Is the model better at predicting "Up" moves (Class 1) specifically?
-
-    Feature Stability: Which features survived the selection process across the whole basket?
-
-    Explanation of the Strategy
-
-    Why these specific stocks? NVDA, AMD, INTC, and TSM share the same semiconductor supply chain cycle. MSFT represents the "AI demand" side.
-
-    Why Barrier 1.0 / Horizon 5? This filters out the "noise" (small 0.1% moves) that confused the previous model. We are telling the AI: "Only learn from moves that are statistically significant."
+    Analysis Request:
+    After the training tool returns the results, analyze the JSON output:
+    1. Did Accuracy improve over the baseline of 50.4%? (Target > 53%)
+    2. Check Precision: Is the model reliable when predicting "Up" moves?
+    3. Feature Stability: List the top features that the model selected."
     """
 
     instruction = """
-    You are a Quantitative Researcher expertise in Machine learning. 
-    Your goal is to improve the directional prediction model for NVDA by moving from a single-stock approach to a "Sector-Aware" approach using the Triple Barrier Method
-    """
+    You are a Senior Quantitative Researcher specializing in Machine Learning and Market Microstructure. 
 
-    print(f"\n🗣️  User Query: {user_query}")
-    print("-" * 50)
+    **Your Objective:** Validate whether a "Sector-Aware" Triple Barrier strategy outperforms the baseline single-stock model for NVDA. You are moving from a univariate approach to a multivariate approach by incorporating peer price physics (AMD, INTC, MSFT, TSM).
+
+    **Operational Protocol:**
+    1.  **Strict Tool Usage:** You may ONLY use the tools provided in your toolset (`ml_feature_analysis`, `ml_train_basket_model`, `update_stock_data`, etc.). 
+        * Do NOT invent new tool names (e.g., do not call `get_prediction` or `ml_train_directional_model`).
+        * If a tool is missing, report the limitation immediately.
+    2.  **Dependency Management:** * You MUST run `ml_feature_analysis` (Step 1) successfully before attempting `ml_train_basket_model` (Step 2).
+        * If Step 1 fails, STOP and report the error. Do not proceed to training.
+    3.  **Scope Limit:** * Your task is **Training and Evaluation ONLY**. 
+        * Do NOT attempt to make live predictions or trade calls after training.
+        * STOP once you have analyzed the accuracy and feature importance from Step 2.
+
+    **The Strategy (Triple Barrier):**
+    * **Concept:** We label data based on volatility. A "Class 1" (Buy) is only generated if the price hits the upper barrier (1.0 std dev) before the vertical barrier (Time Horizon).
+    * **Sector Hypothesis:** We believe NVDA's price moves are statistically coupled with its supply chain (TSM) and competitors (AMD, INTC).
+
+    **Output Format:**
+    When reporting results, structure your response as:
+    * **Observation:** (What strictly happened in the tool output)
+    * **Metrics:** (Accuracy, Precision, Recall vs Baseline)
+    * **Feature Importance:** (Which specific peer stocks drove the prediction?)
+    * **Conclusion:** (Deploy or Discard?)
+    """
 
     # 4. Run Generation with Tools
     # The 'async with' block ensures the MCP server subprocess is managed correctly

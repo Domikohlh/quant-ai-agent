@@ -1,12 +1,13 @@
 # core/database.py
 import os
+import io
 import logging
 
-from google.cloud import bigquery
-from google.cloud import firestore
+from google.cloud import bigquery, firestore, storage
 from google.cloud.sql.connector import Connector
 import sqlalchemy
 from sqlalchemy import text
+import joblib
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,7 @@ class DatabaseManager:
         
         # 2. Firestore Client (Agent Thoughts)
         self.firestore_client = firestore.Client(project=project_id)
+        self.storage_client = storage.Client(project=project_id)
         
         # 3. Cloud SQL Connection (Transactions)
         self.sql_instance = sql_instance_name # Format: "project:region:instance"
@@ -79,6 +81,27 @@ class DatabaseManager:
         job.result()  # Wait for completion
         logger.info("Loaded %s rows to BigQuery: %s", len(df), table_id)
 
+    # --- Helper: Save ML Model to GCS ---
+    def save_model_to_gcs(self, model, bucket_name: str, filename: str) -> str:
+        """
+        Saves a model object to GCS using Joblib compression.
+        Returns the gs:// URI.
+        """
+        try:
+            bucket = self.storage_client.bucket(bucket_name)
+            blob = bucket.blob(filename)
+            
+            buffer = io.BytesIO()
+            joblib.dump(model, buffer, compress=3) 
+            buffer.seek(0)
+            
+            blob.upload_from_file(buffer, content_type='application/octet-stream')
+            gcs_uri = f"gs://{bucket_name}/{filename}"
+            logger.info(f"Saved model to {gcs_uri}")
+            return gcs_uri
+        except Exception as e:
+            logger.error(f"Failed to save model to GCS: {e}")
+            raise e
     # --- Helper: Save Agent Log ---
     def log_agent_thought(self, thought_data: dict):
         """Saves a dictionary (from AgentThought model) to Firestore."""
@@ -121,8 +144,6 @@ class DatabaseManager:
             db_conn.execute(create_transactions_table)
             db_conn.commit()
         logger.info("Tables verified/created successfully.")
-    
-    # Add to core/database.py inside DatabaseManager class
 
     def get_latest_record_info(self, table_id: str, ticker: str):
         """

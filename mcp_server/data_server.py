@@ -8,14 +8,16 @@ import json
 import requests
 from datetime import timedelta, datetime
 import numpy as np
+import joblib
+import io
 
 import pandas as pd
 import yfinance as yf
 from fastmcp import FastMCP
 from dotenv import load_dotenv
 
-from google.cloud import bigquery
-import io
+from google.cloud import bigquery, storage, run_v2
+from google.api_core import client_options
 
 
 # --- 1. Path Setup (To import core/database.py) ---
@@ -25,6 +27,7 @@ project_root = current_dir.parent
 sys.path.append(str(project_root))
 
 from core.database import DatabaseManager
+from helpers.data_helper import get_fred, sanitize_ticker, validate_stock_params, json_serial, train_basket_model_core, run_feature_analysis_core
 
 # --- 2. Initialization ---
 logger = logging.getLogger("QuantDataServer")
@@ -67,9 +70,9 @@ def _get_db() -> DatabaseManager:
     if _db is not None:
         return _db
 
-    _require_env("GCP_PROJECT_ID", "GCP_REGION")
+    _require_env("GCP_PROJECT_ID", "GCP_COMPUTE_REGION")
     project_id = os.getenv("GCP_PROJECT_ID")
-    region = os.getenv("GCP_REGION")
+    region = os.getenv("GCP_COMPUTE_REGION")
 
     _db = DatabaseManager(
         project_id=project_id,
@@ -81,71 +84,25 @@ def _get_db() -> DatabaseManager:
     return _db
 
 
-def _get_fred():
-    global _fred
-    if _fred is not None:
-        return _fred
-    _require_env("FRED_API_KEY")
-    from fredapi import Fred  # local import: only required if macro tool is called
-
-    _fred = Fred(api_key=os.getenv("FRED_API_KEY"))
-    logger.info("Initialized FRED client")
-    return _fred
-
-
-def _sanitize_ticker(raw: str) -> str:
-    cleaned = re.sub(r"[^A-Za-z0-9_]", "_", raw.strip().upper())
-    cleaned = re.sub(r"_+", "_", cleaned).strip("_")
-    if not cleaned:
-        raise ValueError("ticker is empty/invalid after sanitization")
-    return cleaned
-
-
-def _validate_stock_params(ticker: str, period: str, interval: str) -> None:
-    if not isinstance(ticker, str) or not ticker.strip():
-        raise ValueError("ticker must be a non-empty string")
-
-    allowed_periods = {"1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"}
-    allowed_intervals = {"1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h", "1d", "5d", "1wk", "1mo", "3mo"}
-    if period not in allowed_periods:
-        raise ValueError(f"period must be one of {sorted(allowed_periods)}")
-    if interval not in allowed_intervals:
-        raise ValueError(f"interval must be one of {sorted(allowed_intervals)}")
-
-def _json_serial(obj):
-    """JSON serializer for objects not serializable by default json code"""
-    if isinstance(obj, (pd.Timestamp, datetime)):
-        return obj.isoformat()
-    if isinstance(obj, (np.int64, np.int32)):
-        return int(obj)
-    if isinstance(obj, (np.float64, np.float32)):
-        return float(obj)
-    raise TypeError(f"Type {type(obj)} not serializable")
-
-def _get_volatility(close_prices: pd.Series, span: int = 20) -> pd.Series:
-    """Compute dynamic volatility (standard deviation of returns) for Triple Barrier."""
-    # Simple returns
-    returns = close_prices.pct_change()
-    # EWM standard deviation
-    return returns.ewm(span=span).std()
-
 # --- 3. The Tools ---
 
 @mcp.tool()
 def update_stock_data(ticker: str, period: str = "2y", interval: str = "1h") -> str:
     """
-    Downloads stock data from YFinance, calculates Technical Indicators (RSI, MACD, SMA),
-    and saves the stock + technical data to BigQuery.
+    Downloads historical OHLCV data for a stock, calculates technical indicators (RSI, MACD, Bollinger Bands),
+    and saves the data to BigQuery.
     
     Args:
-        ticker: Stock Ticker Symbol like 'AAPL', 'NVDA'
-        period: History to fetch ('1mo', '6mo', '1y', '5y')
-        interval: Time interval for the data ('1h', '1d', '1w', '1m')
+        ticker: The stock symbol (e.g., 'NVDA', 'AAPL').
+        period: How far back to fetch data (e.g., '1y', '2y', '5y'). Defaults to '2y'.
+        interval: Bar size (e.g., '1h', '1d'). Defaults to '1h'.
+
+    
     """
     try:
         # 1. Initial Validation (Your Structure)
-        _validate_stock_params(ticker=ticker, period=period, interval=interval)
-        safe_ticker = _sanitize_ticker(ticker)
+        validate_stock_params(ticker=ticker, period=period, interval=interval)
+        safe_ticker = sanitize_ticker(ticker)
         
         # --- INTELLIGENT INCREMENTAL LOAD ---
         table_id = os.getenv("BQ_TECH_TABLE_ID", "market_data.processed_tech_indicators")
@@ -318,9 +275,11 @@ def update_stock_data(ticker: str, period: str = "2y", interval: str = "1h") -> 
 @mcp.tool()
 def update_macro_data(series_id: str = "GDP") -> str:
     """
-    Fetches macroeconomic data from FRED and stores it.
+    Fetches macroeconomic data from FRED (Federal Reserve Economic Data) and stores it in BigQuery.
+    Useful for getting context on interest rates, inflation, or GDP.
+    
     Args:
-        series_id: FRED Series ID (e.g., 'CPIAUCSL', 'UNRATE', 'FEDFUNDS')
+        series_id: The FRED Series ID (e.g., 'CPIAUCSL' for CPI, 'FEDFUNDS' for Fed Funds Rate).
     """
     try:
         if not isinstance(series_id, str) or not series_id.strip():
@@ -329,7 +288,7 @@ def update_macro_data(series_id: str = "GDP") -> str:
         logger.info("Fetching macro data series_id=%s", series_id)
         
         # 1. Fetch
-        fred = _get_fred()
+        fred = get_fred()
         series = fred.get_series(series_id)
         df = series.to_frame(name="value")
         if df.empty:
@@ -358,12 +317,12 @@ def update_macro_data(series_id: str = "GDP") -> str:
 @mcp.tool()
 def search_financial_news(query: str, count: int = 5) -> str:
     """
-    Searches high-trust financial news sources (Bloomberg, Reuters, WSJ, etc.) 
-    using the Brave Search API. Use this for sentiment analysis and macro news.
+    Searches high-trust financial news sources (Bloomberg, Reuters, WSJ) for specific topics.
+    Use this to find qualitative data to explain quantitative moves.
     
     Args:
-        query: The search topic (e.g., "NVDA institutional sentiment", "US GDP forecast")
-        count: Number of results to return (default 5, max 20)
+        query: The search topic (e.g., "NVDA supply chain issues").
+        count: Number of articles to return (default 5).
     """
     api_key = os.getenv("BRAVE_API_KEY")
     if not api_key:
@@ -445,241 +404,122 @@ def ml_feature_analysis(
     barrier_width: float = 1.0, 
     time_horizon: int = 5,
     correlation_threshold: float = 0.85, 
-    top_n: int = 15
+    top_n: int = 15,
+    run_remote: bool = True
 ) -> str:
     """
-    1. Loads data for a 'Basket' of stocks (general market physics).
-    2. Generates labels using the Triple Barrier Method (Dynamic Volatility).
-    3. Performs Feature Selection (Clustering + RF) on the COMBINED basket.
-    4. Splits into 'Basket Train' and 'Target Test' sets and saves to BigQuery.
+    [STEP 1 of Pipeline] 
+    Performs 'Triple Barrier' labeling and feature engineering on a basket of stocks.
+    This tool GENERATES the training datasets required for Step 2.
     
     Args:
         ticker: The target stock to predict (e.g., 'NVDA').
-        basket: Comma-separated list of peer stocks (e.g., 'NVDA,AMD,INTC,MSFT'). 
-                If None, defaults to just the ticker.
-        barrier_width: Multiplier for volatility (e.g., 1.0 std dev move required).
-        time_horizon: Max bars to wait for the move.
+        basket: A COMMA-SEPARATED string of peer stocks to include in the analysis (e.g., 'NVDA,AMD,INTC,MSFT').
+        barrier_width: The volatility multiplier for the target label (default 1.0).
+        time_horizon: The number of bars to look ahead for the move (default 5).
+        top_n: Number of best features to select (default 15).
+        run_remote: Always set to True to run on Cloud Run Jobs.
     """
+
+    if not run_remote:
+        # Local fallback
+        try:
+            result = run_feature_analysis_core(ticker, basket, barrier_width, time_horizon, correlation_threshold, top_n)
+            return json.dumps(result, default=json_serial, indent=2)
+        except Exception as e:
+            return json.dumps({"status": "error", "message": str(e)})
+
     try:
-        db = _get_db()
-        raw_table_id = os.getenv("BQ_TECH_TABLE_ID", "market_data.processed_tech_indicators")
-        
-        # Parse inputs
-        target_ticker = _sanitize_ticker(ticker)
+        from google.cloud import run_v2
+        project_id = os.getenv("GCP_PROJECT_ID")
+        region = os.getenv("GCP_COMPUTE_REGION", "us-central1")
+        job_name = "quant-training-job" # We reuse the same job definition
+
+        # Pass all args as string flags
+        args = [
+            "python", "mcp_server/training_logic.py",
+            "--task", "analyze",
+            "--ticker", ticker,
+            "--barrier_width", str(barrier_width),
+            "--time_horizon", str(time_horizon),
+            "--top_n", str(top_n)
+        ]
         if basket:
-            ticker_list = [_sanitize_ticker(t) for t in basket.split(",")]
-        else:
-            ticker_list = [target_ticker]
-            
-        # Ensure target is in the list
-        if target_ticker not in ticker_list:
-            ticker_list.append(target_ticker)
+            args.extend(["--basket", basket])
 
-        all_dfs = []
-        
-        # --- PHASE 1: LOAD & LABEL (Triple Barrier) ---
-        for t in ticker_list:
-            query = f"SELECT * FROM `{db.project_id}.{raw_table_id}` WHERE ticker = '{t}' ORDER BY timestamp ASC"
-            df_t = db.bq_client.query(query).to_dataframe()
-            
-            if df_t.empty:
-                continue
-
-            # A. Calculate Volatility
-            df_t['volatility'] = _get_volatility(df_t['close'])
-            
-            # B. Apply Triple Barrier Labeling
-            labels = []
-            # We iterate until len-horizon because we need to look ahead
-            for i in range(len(df_t) - time_horizon):
-                current_price = df_t.iloc[i]['close']
-                vol = df_t.iloc[i]['volatility']
-                
-                if pd.isna(vol) or vol == 0:
-                    labels.append(0)
-                    continue
-                    
-                upper = current_price * (1 + (vol * barrier_width))
-                lower = current_price * (1 - (vol * barrier_width))
-                
-                # Look ahead window
-                future_window = df_t.iloc[i+1 : i+1+time_horizon]['close']
-                
-                hit_upper = future_window[future_window >= upper].any()
-                hit_lower = future_window[future_window <= lower].any()
-                
-                # Label Logic: 1 = Buy (Hit Upper), 0 = Neutral/Sell (Hit Lower or Time Expire)
-                if hit_upper and not hit_lower:
-                    labels.append(1)
-                else:
-                    labels.append(0)
-            
-            # Fill remaining rows with 0 (cannot predict end of data)
-            labels.extend([0] * time_horizon)
-            df_t['target'] = labels
-            
-            # Drop NaN volatility rows (start of data)
-            df_t.dropna(subset=['volatility'], inplace=True)
-            all_dfs.append(df_t)
-
-        if not all_dfs:
-            return json.dumps({"status": "error", "message": "No data found for any ticker in basket."})
-
-        combined_df = pd.concat(all_dfs)
-
-        # --- PHASE 2: FEATURE SELECTION (On Combined Data) ---
-        # Define candidate features
-        metadata_cols = ['timestamp', 'ticker', 'source', 'target', 'volatility']
-        candidate_cols = [c for c in combined_df.columns if c not in metadata_cols and c in combined_df.select_dtypes(include=[np.number]).columns]
-        
-        # Drop rows with NaN in candidates for calculation
-        calc_df = combined_df.dropna(subset=candidate_cols + ['target']).copy()
-        
-        # A. Correlation Clustering
-        from scipy.cluster import hierarchy
-        from scipy.spatial.distance import squareform
-
-        corr = calc_df[candidate_cols].corr().fillna(0)
-        dist_matrix = 1 - np.abs(corr.values)
-        linkage = hierarchy.ward(squareform(dist_matrix))
-        cluster_labels = hierarchy.fcluster(linkage, 1 - correlation_threshold, criterion='distance')
-        
-        cluster_leaders = []
-        for cluster_id in np.unique(cluster_labels):
-            members = [candidate_cols[i] for i, label in enumerate(cluster_labels) if label == cluster_id]
-            cluster_leaders.append(members[0])
-            
-        # B. Importance Ranking (Random Forest)
-        X = calc_df[cluster_leaders]
-        y = calc_df['target']
-        
-        from sklearn.ensemble import RandomForestClassifier
-        rf = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
-        rf.fit(X, y)
-        
-        importance = pd.Series(rf.feature_importances_, index=cluster_leaders).sort_values(ascending=False)
-        selected_features = importance.head(top_n).index.tolist()
-        
-        # --- PHASE 3: SPLIT & SAVE ---
-        # Final Columns: Metadata + Selected Features
-        final_cols = ['timestamp', 'ticker', 'target'] + selected_features
-        final_df = combined_df[final_cols].copy().dropna()
-        
-        # Split Logic:
-        # 1. Test Set: Only the TARGET ticker, and only the recent 20%
-        target_only = final_df[final_df['ticker'] == target_ticker].copy()
-        split_idx = int(len(target_only) * 0.8)
-        cutoff_date = target_only.iloc[split_idx]['timestamp']
-        
-        test_df = target_only[target_only['timestamp'] >= cutoff_date]
-        
-        # 2. Train Set: EVERYTHING (Basket + Old Target) before the cutoff
-        # This prevents data leakage while using the basket to learn patterns
-        train_df = final_df[final_df['timestamp'] < cutoff_date]
-
-        # Save tables
-        train_table_id = f"market_data.training_basket_{target_ticker}"
-        test_table_id = f"market_data.testing_target_{target_ticker}"
-        
-        db.save_market_data(train_df, table_id=train_table_id) 
-        db.save_market_data(test_df, table_id=test_table_id)
-        
-        return json.dumps({
-            "status": "success",
-            "message": f"Created Triple Barrier datasets using basket: {ticker_list}",
-            "train_set_size": len(train_df),
-            "test_set_size": len(test_df),
-            "selected_features": selected_features,
-            "training_table": train_table_id,
-            "testing_table": test_table_id
-        }, default=_json_serial, indent=2)
+        client = run_v2.JobsClient()
+        request = run_v2.RunJobRequest(
+            name=f"projects/{project_id}/locations/{region}/jobs/{job_name}",
+            overrides={
+                "container_overrides": [{
+                    "args": args
+                }]
+            }
+        )
+        operation = client.run_job(request=request)
+        return f"🚀 Feature Analysis Job triggered for {ticker} (Basket: {basket or 'Single'})."
 
     except Exception as e:
-        logger.error(f"Feature analysis failed: {e}")
-        return json.dumps({"status": "error", "message": str(e)})
-
+        return f"Error triggering Cloud Job: {e}"
 
 @mcp.tool()
-def ml_train_directional_model(ticker: str, params: dict = None) -> str:
+def ml_train_basket_model(target_ticker: str, run_remote: bool = True) -> str:
     """
-    Trains XGBoost using the Basket Training Set and Validates on the Target Test Set.
-    (Requires running ml_feature_analysis first).
+    [STEP 2 of Pipeline]
+    Trains an XGBoost classifier using the datasets created by 'ml_feature_analysis'.
+    
+    Args:
+        target_ticker: The stock ticker to train the model for (must match the ticker used in Step 1).
+        run_remote: Always set to True to run on Cloud Run Jobs.
     """
+    project_id = os.getenv("GCP_PROJECT_ID")
+    region = os.getenv("GCP_COMPUTE_REGION", "us-central1")
+    bucket_name = os.getenv("GCS_MODEL_BUCKET", f"{project_id}-models")
+    job_name = "quant-training-job" # Name of your Cloud Run Job
+
+    if not run_remote:
+        # Local fallback for debugging
+        result = train_basket_model_core(target_ticker, bucket_name)
+        return json.dumps(result, indent=2)
+
     try:
-        db = _get_db()
-        target_ticker = _sanitize_ticker(ticker)
-        
-        # Load the specific tables created by the analysis step
-        train_table_id = f"market_data.training_basket_{target_ticker}"
-        test_table_id = f"market_data.testing_target_{target_ticker}"
-        
-        try:
-            # Load Training (Basket)
-            query_train = f"SELECT * FROM `{db.project_id}.{train_table_id}`"
-            df_train = db.bq_client.query(query_train).to_dataframe()
-            
-            # Load Testing (Target Only)
-            query_test = f"SELECT * FROM `{db.project_id}.{test_table_id}` ORDER BY timestamp ASC"
-            df_test = db.bq_client.query(query_test).to_dataframe()
-        except Exception:
-            return json.dumps({"status": "error", "message": "Training/Testing tables not found. Run ml_feature_analysis first."})
-            
-        if df_train.empty or df_test.empty:
-            return json.dumps({"status": "error", "message": "One of the datasets is empty."})
-
-        # Identify Feature Columns (exclude metadata)
-        metadata_cols = ['timestamp', 'ticker', 'target']
-        feature_cols = [c for c in df_train.columns if c not in metadata_cols]
-        
-        X_train, y_train = df_train[feature_cols], df_train['target']
-        X_test, y_test = df_test[feature_cols], df_test['target']
-
-        # Safety Check: Does the basket provide both classes?
-        if y_train.nunique() < 2:
-             return json.dumps({"status": "error", "message": f"Training set (Basket) has insufficient class variety: {y_train.unique()}"})
-        
-        # XGBoost Setup
-        default_params = {
-            'n_estimators': 200,          # Increased for larger basket data
-            'learning_rate': 0.05,        # Slower learning for robustness
-            'max_depth': 5,
-            'objective': 'binary:logistic',
-            'eval_metric': 'logloss',
-            'use_label_encoder': False
-        }
-        if params: default_params.update(params)
-        
-        import xgboost as xgb 
-        model = xgb.XGBClassifier(**default_params)
-        model.fit(X_train, y_train)
-        
-        preds = model.predict(X_test)
-        
-        # Metrics
-        from sklearn.metrics import accuracy_score, classification_report
-        # Force report to show both 0 and 1 even if model is biased
-        report = classification_report(y_test, preds, labels=[0, 1], output_dict=True, zero_division=0)
-        up_metrics = report.get('1', {})
-        
-        return json.dumps({
-            "status": "success",
-            "model_type": "XGBoost (Basket Trained)",
-            "train_source": train_table_id,
-            "test_source": test_table_id,
-            "test_accuracy": round(accuracy_score(y_test, preds), 4),
-            "precision_up": round(up_metrics.get('precision', 0.0), 4),
-            "recall_up": round(up_metrics.get('recall', 0.0), 4),
-            "f1_up": round(up_metrics.get('f1-score', 0.0), 4),
-            "features_used": len(feature_cols)
-        }, default=_json_serial, indent=2)
+        # Trigger Cloud Run Job
+        endpoint = f"{region}-run.googleapis.com"
+        client = run_v2.JobsClient(
+            client_options=client_options.ClientOptions(api_endpoint=endpoint)
+        )
+        request = run_v2.RunJobRequest(
+            name=f"projects/{project_id}/locations/{region}/jobs/{job_name}",
+            overrides={
+                "container_overrides": [{
+                    "args": ["python", "mcp_server/training_logic.py", "--ticker", target_ticker, "--bucket", bucket_name]
+                }]
+            }
+        )
+        operation = client.run_job(request=request)
+        return f"🚀 Training Job triggered for {target_ticker}. Saving to {bucket_name}. (Async execution started)"
 
     except Exception as e:
-        logger.error(f"Training failed: {e}")
-        return json.dumps({"status": "error", "message": f"Training engine error: {str(e)}"})
+        return f"Error triggering Cloud Run Job: {e}"
 
 # --- 4. Running the Server ---
 if __name__ == "__main__":
-    # This starts the stdio server loop
-    # IMPORTANT: MCP stdio transport requires stdout to be reserved for JSON-RPC.
-    # Disable the CLI banner (rich ASCII) which breaks the protocol.
-    mcp.run(show_banner=False)
+    import os
+    
+    # Cloud Run ALWAYS sets the 'PORT' environment variable.
+    # Local runs typically do not.
+    port = os.getenv("PORT")
+
+    if port:
+        # --- CLOUD RUN MODE (SSE / HTTP) ---
+        logger.info(f"🚀 Starting QuantDataServer in SSE mode on port {port}...")
+        
+        # 'transport="sse"' tells FastMCP to start a Uvicorn web server
+        # host="0.0.0.0" is required for Docker/Cloud containers
+        mcp.run(transport="sse", host="0.0.0.0", port=int(port))
+        
+    else:
+        # --- LOCAL MODE (Stdio) ---
+        # This runs when you type 'python data_server.py' or use the inspector locally
+        logger.info("🔌 Starting QuantDataServer in Stdio mode (Local)...")
+        mcp.run()
