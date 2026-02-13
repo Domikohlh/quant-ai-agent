@@ -1,6 +1,7 @@
 from cgitb import text
 import os
 import sys
+import logging
 import asyncio
 from pathlib import Path
 from dotenv import load_dotenv
@@ -16,7 +17,17 @@ from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
 from google.adk.runners import InMemoryRunner
 from google.genai import types
 
+#logging.basicConfig(
+#    level=logging.DEBUG,
+#    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+#    handlers=[logging.StreamHandler(sys.stdout)]
+#)
 
+# Specifically boost the noise for the MCP and ADK libraries
+#logging.getLogger("google.adk").setLevel(logging.DEBUG)
+#logging.getLogger("mcp").setLevel(logging.DEBUG)
+#logging.getLogger("httpcore").setLevel(logging.DEBUG) # Shows raw network requests
+ 
 # --- Path & Env Setup ---
 current_test_dir = Path(__file__).resolve().parent
 project_root = current_test_dir.parent
@@ -77,6 +88,7 @@ async def main():
     1. Only use the tools provided. Do not hallucinate tool names.
     2. If a tool fails, stop and report the exact error message.
     3. If Step 1 fails, do NOT proceed to Step 2.
+    4. Before training the model, you MUST check whether there are existing model in the GCS. If so, use that model directly.
 
     Step 1: Basket Feature Engineering
     Call the tool `ml_feature_analysis` with these rigorous settings to generate the dataset:

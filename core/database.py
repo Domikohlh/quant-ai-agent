@@ -2,6 +2,7 @@
 import os
 import io
 import logging
+import sys
 
 from google.cloud import bigquery, firestore, storage
 from google.cloud.sql.connector import Connector
@@ -102,6 +103,45 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Failed to save model to GCS: {e}")
             raise e
+    
+    def get_latest_model_file(self, bucket_name: str, ticker: str) -> str:
+        """
+        Finds the most recent model file for a ticker in the GCS bucket.
+        Returns the filename (str) or None.
+        """
+        try:
+            blobs = list(self.storage_client.list_blobs(bucket_name, prefix=f"models/{ticker}_basket_"))
+            if not blobs:
+                return None
+            
+            # Sort by time (newest first)
+            blobs.sort(key=lambda x: x.time_created, reverse=True)
+            latest_blob = blobs[0]
+            logger.info(f"Found latest model: {latest_blob.name}")
+            return latest_blob.name
+        except Exception as e:
+            logger.warning(f"Could not list models: {e}")
+            return None
+
+    def load_model_from_gcs(self, bucket_name: str, filename: str):
+        """
+        Downloads and deserializes a model from GCS.
+        """
+        try:
+            bucket = self.storage_client.bucket(bucket_name)
+            blob = bucket.blob(filename)
+            
+            buffer = io.BytesIO()
+            blob.download_to_file(buffer)
+            buffer.seek(0)
+            
+            model = joblib.load(buffer)
+            logger.info(f"Loaded model from gs://{bucket_name}/{filename}")
+            return model
+        except Exception as e:
+            logger.error(f"Failed to load model: {e}")
+            return None
+            
     # --- Helper: Save Agent Log ---
     def log_agent_thought(self, thought_data: dict):
         """Saves a dictionary (from AgentThought model) to Firestore."""

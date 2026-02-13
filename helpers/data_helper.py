@@ -272,11 +272,25 @@ def train_basket_model_core(target_ticker: str, save_bucket: str):
             'eval_metric': 'logloss',
             'use_label_encoder': False
         }
-
-        # 3. Train
         import xgboost as xgb
-        model = xgb.XGBClassifier(**default_params)
-        model.fit(X_train, y_train)
+
+        # 3. Train/Recall model
+        latest_model_file = db.get_latest_model_file(save_bucket, target_ticker)
+        existing_model = None
+    
+        if latest_model_file:
+            logger.info(f"🔄 Incremental Mode: Attempting to update {latest_model_file}...")
+            existing_model = db.load_model_from_gcs(save_bucket, latest_model_file)
+
+        if existing_model:
+            model=existing_model
+            logger.info(f"Resuming training from: {save_bucket}")
+            model.fit(X_train, y_train, xgb_model=model.get_booster())
+
+        else:
+            logger.info("🆕 Fresh Mode: Training model from scratch...")
+            model = xgb.XGBClassifier(**default_params)
+            model.fit(X_train, y_train)
         
         # 4. Save to GCS (Binary)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M")
