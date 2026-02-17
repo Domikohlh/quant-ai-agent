@@ -95,7 +95,7 @@ def _get_db() -> DatabaseManager:
 #====================================================================================
 
 @mcp.tool()
-def update_stock_data(ticker: str, period: str = "2y", interval: str = "1h") -> str:
+def update_stock_data(ticker: str, period: str = "5y", interval: str = "1h") -> str:
     """
     Downloads historical OHLCV data for a stock, calculates technical indicators (RSI, MACD, Bollinger Bands),
     and saves the data to BigQuery.
@@ -474,6 +474,7 @@ def ml_feature_analysis(
     time_horizon: int = 5,
     correlation_threshold: float = 0.85, 
     top_n: int = 15,
+    training_end_date: str="2024-12-31",
     run_remote: bool = True
 ) -> str:
     """
@@ -487,13 +488,17 @@ def ml_feature_analysis(
         barrier_width: The volatility multiplier for the target label (default 1.0).
         time_horizon: The number of bars to look ahead for the move (default 5).
         top_n: Number of best features to select (default 15).
+        training_end_date: The cutoff date. Data BEFORE this is for Training. Data AFTER is for Testing.
         run_remote: Always set to True to run on Cloud Run Jobs.
     """
 
     if not run_remote:
-        # Local fallback
         try:
-            result = run_feature_analysis_core(ticker, basket, barrier_width, time_horizon, correlation_threshold, top_n)
+            # Pass the new date parameter to the core function
+            result = run_feature_analysis_core(
+                ticker, basket, barrier_width, time_horizon, 
+                correlation_threshold, top_n, training_end_date  # <--- Pass it here
+            )
             return json.dumps(result, default=json_serial, indent=2)
         except Exception as e:
             return json.dumps({"status": "error", "message": str(e)})
@@ -511,7 +516,8 @@ def ml_feature_analysis(
             "--ticker", ticker,
             "--barrier_width", str(barrier_width),
             "--time_horizon", str(time_horizon),
-            "--top_n", str(top_n)
+            "--top_n", str(top_n),
+            "--training_end_date", training_end_date
         ]
         if basket:
             args.extend(["--basket", basket])
@@ -532,7 +538,7 @@ def ml_feature_analysis(
         return f"Error triggering Cloud Job: {e}"
 
 @mcp.tool()
-def ml_train_basket_model(target_ticker: str, run_remote: bool = True) -> str:
+def ml_train_basket_model(target_ticker: str, run_remote: bool = True, training_end_date: str="2024-12-31",) -> str:
     """
     [STEP 2 of Pipeline]
     Trains an XGBoost classifier using the datasets created by 'ml_feature_analysis'.
@@ -547,8 +553,8 @@ def ml_train_basket_model(target_ticker: str, run_remote: bool = True) -> str:
     job_name = "quant-training-job" # Name of your Cloud Run Job
 
     if not run_remote:
-        # Local fallback for debugging
-        result = train_basket_model_core(target_ticker, bucket_name)
+        # Pass the new date parameter to the core function
+        result = train_basket_model_core(target_ticker, bucket_name, training_end_date)
         return json.dumps(result, indent=2)
 
     try:
@@ -561,7 +567,13 @@ def ml_train_basket_model(target_ticker: str, run_remote: bool = True) -> str:
             name=f"projects/{project_id}/locations/{region}/jobs/{job_name}",
             overrides={
                 "container_overrides": [{
-                    "args": ["python", "mcp_server/training_logic.py", "--ticker", target_ticker, "--bucket", bucket_name]
+                    "args": ["python", 
+                    "mcp_server/training_logic.py", 
+                    "--task", "train",
+                    "--ticker", target_ticker, 
+                    "--bucket", bucket_name,
+                    "--training_end_date", training_end_date
+                    ]
                 }]
             }
         )

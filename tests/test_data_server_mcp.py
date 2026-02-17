@@ -127,8 +127,9 @@ async def main():
         * `start_date`: "2024-01-01", `end_date`: "2024-12-31"
 
     **FINAL VERDICT:**
+    * Provide the full Machine learning evaluation metrics
     * Report the Accuracy and Sharpe Ratio.
-    * If Sharpe > 1.5, output "DEPLOY". Otherwise "REJECT".
+    * Provide your verdict *BUY/*SELL/*HOLD for NVDA based on the news sentiment, machine learning metrics and backtest result
 
     **Technical error:**
     * Report the exact technical error message to the user if there is any. 

@@ -57,9 +57,10 @@ def run_feature_analysis_core(
     barrier_width: float = 1.0, 
     time_horizon: int = 5,
     correlation_threshold: float = 0.85, 
-    top_n: int = 15
+    top_n: int = 15,
+    training_end_date: str = "2024-12-31"
 ) -> dict:
-    """Core logic: Load BQ data, Cluster, Random Forest, Save to BQ."""
+    """Core logic: Load BQ data, Cluster, Random Forest, cut the data till 2024-12-31 for backtesting, Save to BQ."""
     try:
         db = _get_db()
         raw_table_id = os.getenv("BQ_TECH_TABLE_ID", "market_data.processed_tech_indicators")
@@ -165,21 +166,30 @@ def run_feature_analysis_core(
         final_cols = ['timestamp', 'ticker', 'target'] + selected_features
         final_df = combined_df[final_cols].copy().dropna()
         
-        # Split Logic:
-        # 1. Test Set: Only the TARGET ticker, and only the recent 20%
-        target_only = final_df[final_df['ticker'] == target_ticker].copy()
-        split_idx = int(len(target_only) * 0.8)
-        cutoff_date = target_only.iloc[split_idx]['timestamp']
+        # Parse the cutoff date to 2024-12-31
+        cutoff_dt = pd.to_datetime(training_end_date).tz_localize(None)
         
-        test_df = target_only[target_only['timestamp'] >= cutoff_date]
+       # 1. Test Set: STRICTLY AFTER Cutoff
+        test_df = final_df[
+            (final_df['ticker'] == target_ticker) & 
+            (final_df['timestamp'] > cutoff_dt)
+        ].copy()
         
-        # 2. Train Set: EVERYTHING (Basket + Old Target) before the cutoff
-        # This prevents data leakage while using the basket to learn patterns
-        train_df = final_df[final_df['timestamp'] < cutoff_date]
+        # 2. Train Set: STRICTLY BEFORE Cutoff
+        # (Includes Basket + Target)
+        train_df = final_df[final_df['timestamp'] <= cutoff_dt].copy()
 
-        # Save tables
-        train_table_id = f"market_data.training_basket"
-        test_table_id = f"market_data.testing_target_{target_ticker}"
+        if test_df.empty or train_df.empty:
+            return json.dumps({
+                "status": "error", 
+                "message": f"Split failed. No data found after {training_end_date}. Check if 'update_stock_data' fetched enough history."
+            })
+
+        # Save tables (Overwrite existing)
+        # We embed the DATE in the table name to prevent mixing up versions
+        safe_date = training_end_date.replace("-", "")
+        train_table_id = f"market_data.training_basket_{target_ticker}_{safe_date}"
+        test_table_id = f"market_data.testing_target_{target_ticker}_{safe_date}"
         
         db.save_market_data(train_df, table_id=train_table_id) 
         db.save_market_data(test_df, table_id=test_table_id)
@@ -198,19 +208,33 @@ def run_feature_analysis_core(
         logger.error(f"Core Analysis failed: {e}")
         return json.dumps({"status": "error", "message": f"Core analysis error: {str(e)}"})
 
-def train_basket_model_core(target_ticker: str, save_bucket: str):
+def train_basket_model_core(target_ticker: str, save_bucket: str, training_end_date: str="2024-12-31"):
     """
     The actual training logic (Heavy Lifting).
     Run this inside the Cloud Run Job.
     """
     try:
         db = _get_db()
-        train_table = f"market_data.training_basket_{sanitize_ticker(target_ticker)}"
-        test_table = f"market_data.testing_target_{sanitize_ticker(target_ticker)}"
+        safe_date = training_end_date.replace("-", "")
+
+        train_table = f"market_data.training_basket_{sanitize_ticker(target_ticker)}_{safe_date}"
+        test_table = f"market_data.testing_target_{sanitize_ticker(target_ticker)}_{safe_date}"
         
         # 1. Load Data
         df_train = db.bq_client.query(f"SELECT * FROM `{db.project_id}.{train_table}`").to_dataframe()
         df_test = db.bq_client.query(f"SELECT * FROM `{db.project_id}.{test_table}` ORDER BY timestamp ASC").to_dataframe()
+
+        logger.info(f"Looking for training data in: {train_table}")
+
+        # 2. Verify Data Exists (Fail Fast)
+        try:
+            # Quick check to ensure we aren't training on air
+            db.bq_client.get_table(f"{db.project_id}.{train_table}")
+        except Exception:
+             return json.dumps({
+                 "status": "error", 
+                 "message": f"Table '{train_table}' not found. You MUST run 'ml_feature_analysis' with training_end_date='{training_end_date}' first."
+             })
         
         # 2. Setup Features
         meta = ['timestamp', 'ticker', 'source', 'target', 'volatility']

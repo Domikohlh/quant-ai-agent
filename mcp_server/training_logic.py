@@ -1,58 +1,71 @@
 # worker.py
 import argparse
-import logging
-import sys
 import os
-import json
+import sys
+import logging
+from pathlib import Path
 
-# Add project root to path to allow importing data_server
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+# Add project root to sys.path so we can import helpers
+current_dir = Path(__file__).resolve().parent
+project_root = current_dir.parent
+sys.path.append(str(project_root))
 
-from data_server import train_basket_model_core, run_feature_analysis_core
+from helpers.ml_helper import run_feature_analysis_core, train_basket_model_core
 
+# Configure Logging
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("TrainingWorker")
+logger = logging.getLogger("TrainingJob")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    # Task Selector
-    parser.add_argument("--task", type=str, choices=["train", "analyze"], default="train", help="Which task to run")
+    parser = argparse.ArgumentParser(description="Quant Training Job Entry Point")
     
-    # Shared Args
-    parser.add_argument("--ticker", type=str, required=True)
-    
-    # Train Args
-    parser.add_argument("--bucket", type=str, help="GCS Bucket (Train only)")
-    
-    # Analysis Args
-    parser.add_argument("--basket", type=str, default=None)
+    # --- 1. The Critical Missing Argument ---
+    parser.add_argument("--task", type=str, required=True, choices=["analyze", "train"], help="Which task to run")
+
+    # --- 2. Shared Arguments ---
+    parser.add_argument("--ticker", type=str, required=True, help="Target stock ticker (e.g. NVDA)")
+    parser.add_argument("--training_end_date", type=str, default="2024-12-31", help="Hard cutoff date for train/test split")
+
+    # --- 3. Analysis Specific Arguments ---
+    parser.add_argument("--basket", type=str, default=None, help="Comma-separated basket tickers")
     parser.add_argument("--barrier_width", type=float, default=1.0)
     parser.add_argument("--time_horizon", type=int, default=5)
     parser.add_argument("--top_n", type=int, default=15)
 
+    # --- 4. Training Specific Arguments ---
+    parser.add_argument("--bucket", type=str, default=None, help="GCS Bucket for model saving")
+
     args = parser.parse_args()
+    
+    logger.info(f"🚀 Starting Job: {args.task} for {args.ticker} (Cutoff: {args.training_end_date})")
 
     try:
-        if args.task == "train":
-            if not args.bucket:
-                raise ValueError("--bucket is required for training task")
-                
-            logger.info(f"🚀 Starting TRAINING for {args.ticker}...")
-            result = train_basket_model_core(args.ticker, args.bucket)
-            logger.info(f"✅ Train Complete: {result}")
-
-        elif args.task == "analyze":
-            logger.info(f"🔬 Starting ANALYSIS for {args.ticker} (Basket: {args.basket})...")
+        if args.task == "analyze":
+            # Run Feature Engineering
             result = run_feature_analysis_core(
                 ticker=args.ticker,
                 basket=args.basket,
                 barrier_width=args.barrier_width,
                 time_horizon=args.time_horizon,
-                top_n=args.top_n
+                top_n=args.top_n,
+                training_end_date=args.training_end_date
             )
-            # Worker logs are captured by Cloud Logging, so printing JSON helps debugging
-            logger.info(f"✅ Analysis Complete: {json.dumps(result, default=str)}")
-        
+            print(result) # Print JSON to stdout so Cloud Logging captures it
+
+        elif args.task == "train":
+            # Run Model Training
+            # Ensure bucket is set
+            bucket = args.bucket or os.getenv("GCS_MODEL_BUCKET")
+            if not bucket:
+                raise ValueError("Bucket name is required for training (env var GCS_MODEL_BUCKET or --bucket arg)")
+
+            result = train_basket_model_core(
+                target_ticker=args.ticker,
+                save_bucket=bucket,
+                training_end_date=args.training_end_date
+            )
+            print(result)
+
     except Exception as e:
-        logger.error(f"❌ Training Failed: {e}")
-        sys.exit(1)
+        logger.error(f"Job Failed: {e}")
+        sys.exit(1) # Exit with error code so Cloud Run marks job as failed
