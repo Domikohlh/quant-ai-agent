@@ -21,36 +21,10 @@ logger = logging.getLogger("DataHelper")  # <--- 3. Define the logger object
 
 _db = None
 
-def _get_db() -> DatabaseManager:
-    """
-    Singleton pattern to get the DatabaseManager.
-    This allows both the MCP Server and the Cloud Run Job (Worker) to connect.
-    """
-    global _db
-    if _db is not None:
-        return _db
-
-    # Ensure required env vars exist
-    project_id = os.getenv("GCP_PROJECT_ID")
-    region = os.getenv("GCP_COMPUTE_REGION", "us-central1") # Default to us-central1 if missing
-
-    if not project_id:
-        raise ValueError("GCP_PROJECT_ID is missing from environment variables.")
-
-    # Initialize the manager
-    _db = DatabaseManager(
-        project_id=project_id,
-        region=region,
-        sql_instance_name=os.getenv("SQL_INSTANCE_NAME", "dummy"),
-        sql_db_name=os.getenv("SQL_DB_NAME", "dummy"),
-    )
-    return _db
-
 def get_fred():
     global _fred
     if _fred is not None:
         return _fred
-    _require_env("FRED_API_KEY")
     from fredapi import Fred  # local import: only required if macro tool is called
 
     _fred = Fred(api_key=os.getenv("FRED_API_KEY"))

@@ -13,6 +13,7 @@ project_root = current_dir.parent
 sys.path.append(str(project_root))
 
 from core.database import DatabaseManager
+from helpers.data_helper import sanitize_ticker, get_volatility, json_serial
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("DataHelper")  # <--- 3. Define the logger object
