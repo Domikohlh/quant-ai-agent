@@ -21,6 +21,7 @@ google-genai
 google-adk
 requests
 uvicorn
+numba
 
 #New Requirements
 google-cloud-bigquery

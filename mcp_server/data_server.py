@@ -27,7 +27,7 @@ project_root = current_dir.parent
 sys.path.append(str(project_root))
 
 from core.database import DatabaseManager
-from helpers.data_helper import get_fred, sanitize_ticker, validate_stock_params, json_serial, train_basket_model_core, run_feature_analysis_core
+from helpers.data_helper import get_fred, sanitize_ticker, validate_stock_params, json_serial, train_basket_model_core, run_feature_analysis_core, run_backtest_core
 
 # --- 2. Initialization ---
 logger = logging.getLogger("QuantDataServer")
@@ -85,6 +85,12 @@ def _get_db() -> DatabaseManager:
 
 
 # --- 3. The Tools ---
+
+#====================================================================================
+
+# 3.1 Data Calculating Module
+
+#====================================================================================
 
 @mcp.tool()
 def update_stock_data(ticker: str, period: str = "2y", interval: str = "1h") -> str:
@@ -397,6 +403,67 @@ def search_financial_news(query: str, count: int = 5) -> str:
         logger.error(f"Error executing Brave search: {e}")
         return f"Error executing search: {str(e)}"
 
+#====================================================================================
+
+# 3.2 Machine Learning Module
+
+#====================================================================================
+@mcp.tool()
+def get_latest_model_uri(ticker: str) -> str:
+    """
+    Retrieves the GCS URI of the most recently trained model for a specific ticker.
+    This tool performs a fuzzy search in the 'models/' folder for any file containing the ticker.
+    MUST perform this tool first before running any machine learning training module. 
+    
+    Args:
+        ticker: The stock symbol (e.g., 'NVDA').
+    """
+    try:
+        db = _get_db()
+        
+        # --- FIX: Added Fallback Logic ---
+        project_id = os.getenv("GCP_PROJECT_ID")
+        bucket_name = os.getenv("GCS_MODEL_BUCKET", f"{project_id}-models")
+        
+        if not bucket_name:
+            return "Error: Could not determine bucket name. GCS_MODEL_BUCKET is missing."
+
+        bucket = db.storage_client.bucket(bucket_name)
+        
+        # List all blobs in models/ folder
+        blobs = list(bucket.list_blobs(prefix="models/"))
+        
+        if not blobs:
+            return f"Error: No models found in gs://{bucket_name}/models/"
+
+        # Filter for ticker (Fuzzy Match)
+        matching_blobs = [
+            b for b in blobs 
+            if ticker in b.name and b.name.endswith(".joblib")
+        ]
+        
+        if not matching_blobs:
+            # Debug: Show top 3 files found to help diagnose naming mismatches
+            sample_names = [b.name for b in blobs[:3]]
+            return f"No model found for {ticker} in {bucket_name}. Existing files: {sample_names}"
+
+        # Sort by time (Newest First)
+        matching_blobs.sort(key=lambda x: x.time_created, reverse=True)
+        latest_blob = matching_blobs[0]
+        
+        uri = f"gs://{bucket_name}/{latest_blob.name}"
+        
+        # --- FIX: Return a prompt instruction, not just a string ---
+        return (
+            f"FOUND EXISTING MODEL: {uri}\n"
+            f"INSTRUCTION: An existing model was found. STOP Phase 1 and 2. "
+            f"Do NOT retrain. Proceed immediately to Phase 3 (backtest_model_strategy) using this URI."
+        )
+            
+    except Exception as e:
+        logger.error(f"Error finding model: {e}")
+        return f"Error: {str(e)}"
+
 @mcp.tool()
 def ml_feature_analysis(
     ticker: str, 
@@ -501,6 +568,31 @@ def ml_train_basket_model(target_ticker: str, run_remote: bool = True) -> str:
 
     except Exception as e:
         return f"Error triggering Cloud Run Job: {e}"
+
+#====================================================================================
+
+# 3.3 Backtesting Module
+
+#====================================================================================
+@mcp.tool()
+def backtest_model_strategy(
+    ticker: str,
+    model_uri: str,
+    start_date: str = "2025-01-01",
+    end_date: str = "2025-12-31"
+) -> str:
+    """
+    Validates a trained model by running a vectorized backtest on historical data.
+    Uses 'Triple Barrier' physics (Stop Loss 3%, Take Profit 5%, Time Limit 5 days).
+    
+    Args:
+        ticker: The stock symbol (e.g., 'NVDA').
+        model_uri: GCS URI of the trained model (from ml_train_basket_model).
+        start_date: YYYY-MM-DD
+        end_date: YYYY-MM-DD
+    """
+    result = run_backtest_core(ticker, model_uri, start_date, end_date)
+    return json.dumps(result, indent=2)
 
 # --- 4. Running the Server ---
 if __name__ == "__main__":

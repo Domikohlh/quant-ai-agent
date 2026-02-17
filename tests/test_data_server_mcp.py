@@ -50,6 +50,14 @@ os.environ["GOOGLE_CLOUD_PROJECT"] = PROJECT_ID
 os.environ["GOOGLE_CLOUD_LOCATION"] = LOCATION
 os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "true"
 
+# Avoid rate limits and temorary service unavailability 
+retry_config = types.HttpRetryOptions(
+    attempts=5,  # Maximum retry attempts
+    exp_base=7,  # Delay multiplier
+    initial_delay=1,
+    http_status_codes=[429, 500, 503, 504],  # Retry on these HTTP errors
+)
+
 # --- The Vertex AI Agent ---
 async def main():
     print(f"\n--- 🔌 Connecting to MCP Server: {server_script_path.name} ---")
@@ -81,65 +89,54 @@ async def main():
 
     model_id = "gemini-3-flash-preview" 
     user_query = """
-
-    Task: Execute the following 2-step pipeline to retrain the model for NVDA.
-
-    Strict Constraints:
-    1. Only use the tools provided. Do not hallucinate tool names.
-    2. If a tool fails, stop and report the exact error message.
-    3. If Step 1 fails, do NOT proceed to Step 2.
-    4. Before training the model, you MUST check whether there are existing model in the GCS. If so, use that model directly.
-
-    Step 1: Basket Feature Engineering
-    Call the tool `ml_feature_analysis` with these rigorous settings to generate the dataset:
-    - Target: "NVDA"
-    - Basket: "NVDA,AMD,INTC,MSFT,TSM" (Semiconductor supply chain & AI demand).
-    - Barrier Width: 1.0 (Targeting a 1 standard deviation move).
-    - Time Horizon: 5 (Move must happen within 5 bars).
-    - Top N: 15 (Keep top 15 features).
-
-    Step 2: Train Model
-    Once Step 1 is confirmed successful, call `ml_train_basket_model`.
-    - Target: "NVDA"
-    - Run Remote: True
-
-    Analysis Request:
-    After the training tool returns the results, analyze the JSON output:
-    1. Did Accuracy improve over the baseline of 50.4%? (Target > 53%)
-    2. Check Precision: Is the model reliable when predicting "Up" moves?
-    3. Feature Stability: List the top features that the model selected."
-    """
+    Action: Retrain and validate the Sector-Aware Model for NVDA.
+    
+    Context:
+    - Target Asset: NVDA
+    - Strategy Type: Triple Barrier (Basket)
+    - Backtest Period: 2025-01-01 to 2025-12-31
+"""
 
     instruction = """
-    You are a Senior Quantitative Researcher specializing in Machine Learning and Market Microstructure. 
+    You are a Senior Quantitative Researcher. You execute strict algorithmic pipelines.
 
-    **Your Objective:** Validate whether a "Sector-Aware" Triple Barrier strategy outperforms the baseline single-stock model for NVDA. You are moving from a univariate approach to a multivariate approach by incorporating peer price physics (AMD, INTC, MSFT, TSM).
+    **CRITICAL TOOL SAFETY RULES:**
+    1. Use ONLY: `get_latest_model_uri`, `ml_feature_analysis`, `ml_train_basket_model`, `backtest_model_strategy`.
+    2. Do NOT hallucinate filenames. If you don't have a URI, you cannot backtest.
 
-    **Operational Protocol:**
-    1.  **Strict Tool Usage:** You may ONLY use the tools provided in your toolset (`ml_feature_analysis`, `ml_train_basket_model`, `update_stock_data`, etc.). 
-        * Do NOT invent new tool names (e.g., do not call `get_prediction` or `ml_train_directional_model`).
-        * If a tool is missing, report the limitation immediately.
-    2.  **Dependency Management:** * You MUST run `ml_feature_analysis` (Step 1) successfully before attempting `ml_train_basket_model` (Step 2).
-        * If Step 1 fails, STOP and report the error. Do not proceed to training.
-    3.  **Scope Limit:** * Your task is **Training and Evaluation ONLY**. 
-        * Do NOT attempt to make live predictions or trade calls after training.
-        * STOP once you have analyzed the accuracy and feature importance from Step 2.
+    **STANDARD OPERATING PROCEDURE (SOP):**
 
-    **The Strategy (Triple Barrier):**
-    * **Concept:** We label data based on volatility. A "Class 1" (Buy) is only generated if the price hits the upper barrier (1.0 std dev) before the vertical barrier (Time Horizon).
-    * **Sector Hypothesis:** We believe NVDA's price moves are statistically coupled with its supply chain (TSM) and competitors (AMD, INTC).
+    **Phase 0: Discovery (Mandatory)**
+    * **Tool:** `get_latest_model_uri(ticker="NVDA")`
+    * **Logic:** * If it returns a URI (e.g., `gs://...`), **SKIP Phase 1 & 2**. Go straight to Phase 3.
+        * If it returns "None", proceed to Phase 1.
 
-    **Output Format:**
-    When reporting results, structure your response as:
-    * **Observation:** (What strictly happened in the tool output)
-    * **Metrics:** (Accuracy, Precision, Recall vs Baseline)
-    * **Feature Importance:** (Which specific peer stocks drove the prediction?)
-    * **Conclusion:** (Deploy or Discard?)
+    **Phase 1: Feature Engineering**
+    * **Tool:** `ml_feature_analysis` (Basket="NVDA,AMD,INTC,MSFT,TSM", Barrier=1.0, Horizon=5, Run_Remote=True)
+
+    **Phase 2: Model Training**
+    * **Tool:** `ml_train_basket_model` (Target="NVDA", Run_Remote=True)
+    * **WAIT:** The training is asynchronous. It takes time.
+    * **Retrieval:** After triggering training, you MUST call `get_latest_model_uri("NVDA")` again to get the NEW filename. 
+    * **Loop:** If `get_latest_model_uri` still returns "None" or the old model, wait and retry fetching the URI. Do NOT retrain.
+
+    **Phase 3: Strategy Backtesting (QA)**
+    * **Tool:** `backtest_model_strategy`
+    * **Mandatory Params:**
+        * `model_uri`: (The exact URI you retrieved in Phase 0 or Phase 2).
+        * `start_date`: "2024-01-01", `end_date`: "2024-12-31"
+
+    **FINAL VERDICT:**
+    * Report the Accuracy and Sharpe Ratio.
+    * If Sharpe > 1.5, output "DEPLOY". Otherwise "REJECT".
+
+    **Technical error:**
+    * Report the exact technical error message to the user if there is any. 
     """
 
     # 4. Run Generation with Tools
     # The 'async with' block ensures the MCP server subprocess is managed correctly
-    model = Gemini(model=model_id, client=client)
+    model = Gemini(model=model_id, client=client, retry_options=retry_config)
     agent = LlmAgent(
         model=model,
         name="quant_agent",
