@@ -54,10 +54,11 @@ def _get_db() -> DatabaseManager:
 def run_feature_analysis_core(
     ticker: str, 
     basket: str = None, 
-    barrier_width: float = 1.0, 
-    time_horizon: int = 5,
-    correlation_threshold: float = 0.85, 
-    top_n: int = 15,
+    barrier_width: float = 0.8, 
+    time_horizon: int = 12,
+    correlation_threshold: float = 0.75, 
+    top_n: int = 12,
+    training_start_date: str = "2022-01-01",
     training_end_date: str = "2024-12-31"
 ) -> dict:
     """Core logic: Load BQ data, Cluster, Random Forest, cut the data till 2024-12-31 for backtesting, Save to BQ."""
@@ -169,7 +170,7 @@ def run_feature_analysis_core(
         # Parse the cutoff date to 2024-12-31
         cutoff_dt = pd.to_datetime(training_end_date).tz_localize(None)
         
-       # 1. Test Set: STRICTLY AFTER Cutoff
+        # 1. Test Set: STRICTLY AFTER Cutoff
         test_df = final_df[
             (final_df['ticker'] == target_ticker) & 
             (final_df['timestamp'] > cutoff_dt)
@@ -275,12 +276,7 @@ def train_basket_model_core(target_ticker: str, save_bucket: str, training_end_d
             logger.info("🆕 Fresh Mode: Training model from scratch...")
             model = xgb.XGBClassifier(**default_params)
             model.fit(X_train, y_train)
-        
-        # 4. Save to GCS (Binary)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-        filename = f"models/{target_ticker}_basket_{timestamp}.joblib"
-        gcs_path = db.save_model_to_gcs(model, save_bucket, filename)
-        
+                
         # 5. Metrics
         preds = model.predict(X_test)
 
@@ -288,15 +284,27 @@ def train_basket_model_core(target_ticker: str, save_bucket: str, training_end_d
         report = classification_report(y_test, preds, labels=[0, 1], output_dict=True, zero_division=0)
         up_metrics = report.get('1', {})
         
-        return json.dumps({"status": "success",
-                "model_path": gcs_path, 
-                "features_used": len(features),
-                "model_type": "XGBoost (Basket Trained)",
-                "test_accuracy": round(accuracy_score(y_test, preds), 4),
-                "precision_up": round(up_metrics.get('precision', 0.0), 4),
-                "recall_up": round(up_metrics.get('recall', 0.0), 4),
-                "f1_up": round(up_metrics.get('f1-score', 0.0), 4),
-            }, default=json_serial, indent=2)
+        # Create a dictionary of strings for GCS Metadata compatibility
+        metrics_dict = {
+            "features_used": str(len(features)),
+            "model_type": "XGBoost (Basket Trained)",
+            "test_accuracy": str(round(accuracy_score(y_test, preds), 4)),
+            "precision_up": str(round(up_metrics.get('precision', 0.0), 4)),
+            "recall_up": str(round(up_metrics.get('recall', 0.0), 4)),
+            "f1_up": str(round(up_metrics.get('f1-score', 0.0), 4))
+        }
+
+        # 5. Save to GCS (Binary + Metadata)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+        filename = f"models/{target_ticker}_basket_{timestamp}.joblib"
+        
+        # Pass the metrics_dict to the updated save function
+        gcs_path = db.save_model_to_gcs(model, save_bucket, filename, metadata=metrics_dict)
+        
+        metrics_dict["status"] = "success"
+        metrics_dict["model_path"] = gcs_path
+        
+        return json.dumps(metrics_dict, default=json_serial, indent=2)
         
     except Exception as e:
         logger.error(f"Training failed: {e}")

@@ -18,6 +18,8 @@ from dotenv import load_dotenv
 
 from google.cloud import bigquery, storage, run_v2
 from google.api_core import client_options
+import asyncio
+from google.cloud.exceptions import NotFound
 
 
 # --- 1. Path Setup (To import core/database.py) ---
@@ -95,6 +97,58 @@ def _get_db() -> DatabaseManager:
 #====================================================================================
 
 @mcp.tool()
+def check_existing_dataset(
+    ticker: str, 
+    basket_name: str = "default", 
+    training_end_date: str = "2024-12-31"
+) -> str:
+    """
+    Checks BigQuery to see if data exists for this asset and strategy.
+    Returns the exact status of BOTH raw data and engineered training data.
+
+    Args: 
+
+        ticker = Target ticker for analysis
+        basket_name = Set it to default for further finding 
+        training_end_date = Set it to 2024-12-31 for the cutoff for backtesting in later stage
+    """
+    print(f"🔍 [AGENT HEARTBEAT]: Checking BigQuery for {ticker} ({basket_name}) data...")
+    try:
+        db = _get_db()
+        safe_ticker = ticker.replace("-", "_").upper()
+        safe_strategy = basket_name.replace("-", "_").lower()
+        safe_date = training_end_date.replace("-", "")
+        
+        # Check 1: Raw Market Data
+        raw_table = f"{db.project_id}.market_data.processed_indicators_{safe_strategy}"
+        raw_exists = False
+        try:
+            db.bq_client.get_table(raw_table)
+            raw_exists = True
+        except NotFound:
+            pass
+
+        # Check 2: Engineered Training Data
+        train_table = f"{db.project_id}.market_data.training_{safe_strategy}_{safe_ticker}_{safe_date}"
+        train_exists = False
+        try:
+            db.bq_client.get_table(train_table)
+            train_exists = True
+        except NotFound:
+            pass
+
+        # Return explicit instructions to the Agent
+        if train_exists:
+            return "✅ FOUND: Engineered training data exists. SKIP `update_stock_data` and SKIP `ml_feature_analysis`. Proceed directly to Phase 2 (Model Training)."
+        elif raw_exists and not train_exists:
+            return "⚠️ PARTIAL: Raw data exists, but training data is missing. SKIP `update_stock_data`, but you MUST run `ml_feature_analysis`."
+        else:
+            return "❌ NOT FOUND: No data exists. You MUST run `update_stock_data` first, then run `ml_feature_analysis`."
+
+    except Exception as e:
+        return f"Error checking database: {str(e)}"
+
+@mcp.tool()
 def update_stock_data(ticker: str, period: str = "5y", interval: str = "1h") -> str:
     """
     Downloads historical OHLCV data for a stock, calculates technical indicators (RSI, MACD, Bollinger Bands),
@@ -102,7 +156,7 @@ def update_stock_data(ticker: str, period: str = "5y", interval: str = "1h") -> 
     
     Args:
         ticker: The stock symbol (e.g., 'NVDA', 'AAPL').
-        period: How far back to fetch data (e.g., '1y', '2y', '5y'). Defaults to '2y'.
+        period: How far back to fetch data (e.g., '1y', '2y', '5y').
         interval: Bar size (e.g., '1h', '1d'). Defaults to '1h'.
 
     
@@ -422,48 +476,48 @@ def get_latest_model_uri(ticker: str) -> str:
     """
     try:
         db = _get_db()
-        
-        # --- FIX: Added Fallback Logic ---
         project_id = os.getenv("GCP_PROJECT_ID")
         bucket_name = os.getenv("GCS_MODEL_BUCKET", f"{project_id}-models")
-        
-        if not bucket_name:
-            return "Error: Could not determine bucket name. GCS_MODEL_BUCKET is missing."
-
         bucket = db.storage_client.bucket(bucket_name)
         
-        # List all blobs in models/ folder
         blobs = list(bucket.list_blobs(prefix="models/"))
-        
-        if not blobs:
-            return f"Error: No models found in gs://{bucket_name}/models/"
-
-        # Filter for ticker (Fuzzy Match)
-        matching_blobs = [
-            b for b in blobs 
-            if ticker in b.name and b.name.endswith(".joblib")
-        ]
+        matching_blobs = [b for b in blobs if ticker in b.name and b.name.endswith(".joblib")]
         
         if not matching_blobs:
-            # Debug: Show top 3 files found to help diagnose naming mismatches
-            sample_names = [b.name for b in blobs[:3]]
-            return f"No model found for {ticker} in {bucket_name}. Existing files: {sample_names}"
+            return f"Error: No models found for {ticker}."
 
         # Sort by time (Newest First)
         matching_blobs.sort(key=lambda x: x.time_created, reverse=True)
         latest_blob = matching_blobs[0]
         
+        # --- FIX: The Race Condition Time Gate ---
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        age_in_minutes = (now - latest_blob.time_created).total_seconds() / 60
+        
+        # If the newest model is older than 15 minutes, the Cloud Run job hasn't finished saving the new one yet.
+        if age_in_minutes > 15:
+            return (
+                f"⏳ STILL TRAINING: The newest model found is {int(age_in_minutes)} minutes old. "
+                f"The background incremental training job has not finished yet. "
+                f"Do NOT proceed. Wait 60 seconds and call this tool again."
+            )
+
+        # --- FIX: Retrieve Metadata ---
+        # GCS requires reloading the blob to fetch custom metadata
+        latest_blob.reload() 
+        metrics_text = json.dumps(latest_blob.metadata, indent=2) if latest_blob.metadata else "No metrics found attached to model."
+        
         uri = f"gs://{bucket_name}/{latest_blob.name}"
         
-        # --- FIX: Return a prompt instruction, not just a string ---
         return (
-            f"FOUND EXISTING MODEL: {uri}\n"
-            f"INSTRUCTION: An existing model was found. STOP Phase 1 and 2. "
-            f"Do NOT retrain. Proceed immediately to Phase 3 (backtest_model_strategy) using this URI."
+            f"✅ FOUND LATEST MODEL: {uri}\n\n"
+            f"--- TRUE ML METRICS ---\n"
+            f"{metrics_text}\n\n"
+            f"INSTRUCTION: Model retrieval successful. Proceed immediately to Phase 3 (backtest_model_strategy) using this URI."
         )
             
     except Exception as e:
-        logger.error(f"Error finding model: {e}")
         return f"Error: {str(e)}"
 
 @mcp.tool()
@@ -481,6 +535,7 @@ def ml_feature_analysis(
     [STEP 1 of Pipeline] 
     Performs 'Triple Barrier' labeling and feature engineering on a basket of stocks.
     This tool GENERATES the training datasets required for Step 2.
+    **CRITICAL *ONLY RUN THIS FUNCTION ONCE.
     
     Args:
         ticker: The target stock to predict (e.g., 'NVDA').
@@ -542,6 +597,7 @@ def ml_train_basket_model(target_ticker: str, run_remote: bool = True, training_
     """
     [STEP 2 of Pipeline]
     Trains an XGBoost classifier using the datasets created by 'ml_feature_analysis'.
+    **CRITICAL * ONLY RUN THIS FUNCTION ONCE.
     
     Args:
         target_ticker: The stock ticker to train the model for (must match the ticker used in Step 1).
@@ -582,6 +638,7 @@ def ml_train_basket_model(target_ticker: str, run_remote: bool = True, training_
 
     except Exception as e:
         return f"Error triggering Cloud Run Job: {e}"
+
 
 #====================================================================================
 

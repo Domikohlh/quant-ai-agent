@@ -83,22 +83,27 @@ class DatabaseManager:
         logger.info("Loaded %s rows to BigQuery: %s", len(df), table_id)
 
     # --- Helper: Save ML Model to GCS ---
-    def save_model_to_gcs(self, model, bucket_name: str, filename: str) -> str:
+    def save_model_to_gcs(self, model, bucket_name: str, filename: str, metadata: dict = None) -> str:
         """
-        Saves a model object to GCS using Joblib compression.
+        Saves a model object to GCS using Joblib compression and attaches metadata.
         Returns the gs:// URI.
         """
         try:
             bucket = self.storage_client.bucket(bucket_name)
             blob = bucket.blob(filename)
             
+            # --- NEW: Attach custom metadata if provided ---
+            if metadata:
+                blob.metadata = metadata
+            
             buffer = io.BytesIO()
+            import joblib
             joblib.dump(model, buffer, compress=3) 
             buffer.seek(0)
             
             blob.upload_from_file(buffer, content_type='application/octet-stream')
             gcs_uri = f"gs://{bucket_name}/{filename}"
-            logger.info(f"Saved model to {gcs_uri}")
+            logger.info(f"Saved model to {gcs_uri} with metadata: {metadata}")
             return gcs_uri
         except Exception as e:
             logger.error(f"Failed to save model to GCS: {e}")

@@ -20,6 +20,7 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("DataHelper")  # <--- 3. Define the logger object
 
 _db = None
+_fred = None
 
 def get_fred():
     global _fred

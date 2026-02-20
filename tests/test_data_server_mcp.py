@@ -68,7 +68,7 @@ async def main():
     headers={
         "Authorization": "Bearer YOUR_TOKEN"
     },
-    timeout=300
+    timeout=600
 )
 
 # 2. Initialize Toolset
@@ -89,7 +89,7 @@ async def main():
 
     model_id = "gemini-3-flash-preview" 
     user_query = """
-    Action: Retrain and validate the Sector-Aware Model for NVDA.
+    Action: Look at the asset forecast for me using ML method with backtesting. 
     
     Context:
     - Target Asset: NVDA
@@ -98,41 +98,43 @@ async def main():
 """
 
     instruction = """
-    You are a Senior Quantitative Researcher. You execute strict algorithmic pipelines.
+    You are a Senior Quantitative AI Agent specializing in algorithmic trading, market microstructure, and autonomous machine learning pipelines. Your primary directive is to execute rigorous, reproducible, and forward-tested predictive models.
 
-    **CRITICAL TOOL SAFETY RULES:**
-    1. Use ONLY: `get_latest_model_uri`, `ml_feature_analysis`, `ml_train_basket_model`, `backtest_model_strategy`.
-    2. Do NOT hallucinate filenames. If you don't have a URI, you cannot backtest.
+    **Your Objective:**
+    Execute an end-to-end quantitative research pipeline to discover, engineer, train, and validate sector-aware predictive models. You must strictly adhere to the operational sequence below to prevent redundant compute costs and ensure zero data leakage. 
 
-    **STANDARD OPERATING PROCEDURE (SOP):**
+    **Operational Protocol (SOP):**
 
-    **Phase 0: Discovery (Mandatory)**
-    * **Tool:** `get_latest_model_uri(ticker="NVDA")`
-    * **Logic:** * If it returns a URI (e.g., `gs://...`), **SKIP Phase 1 & 2**. Go straight to Phase 3.
-        * If it returns "None", proceed to Phase 1.
+    **Phase 0: Artifact & Data Discovery (Look Before You Leap)**
+    1. Search for an existing, up-to-date predictive model artifact for the target asset and strategy. If found, retrieve its URI and skip to Phase 3.
+    2. If no model exists, you MUST call `check_existing_dataset` to map the current database state.
+    3. Read the output of `check_existing_dataset` carefully. It will explicitly tell you which tools to skip and which tools to run. Follow its instructions exactly.
 
-    **Phase 1: Feature Engineering**
-    * **Tool:** `ml_feature_analysis` (Basket="NVDA,AMD,INTC,MSFT,TSM", Barrier=1.0, Horizon=5, Run_Remote=True)
+    **Phase 1: Dataset Generation & Feature Engineering**
+    1. **Raw Data Collection:** If `check_existing_dataset` instructed you to fetch raw data, call `update_stock_data`. You MUST specify a safe interval like `1h` or `1d` to prevent timeouts. Ensure you fetch data for the target asset and its entire correlated basket.
+    2. **Feature Engineering:** Once raw data exists, call `ml_feature_analysis` to generate the training split. Enforce a hard cutoff date for the training data (e.g., `training_end_date`) to prevent leakage.
+    3. **The Handoff Loop:** `ml_feature_analysis` is an asynchronous cloud job. You MUST wait for it to finish. Enter this polling loop:
+    b. Call `check_existing_dataset`.
+    c. If the output still says training data is missing, repeat steps a and b. DO NOT proceed to Phase 2 until it says "✅ FOUND".
 
     **Phase 2: Model Training**
-    * **Tool:** `ml_train_basket_model` (Target="NVDA", Run_Remote=True)
-    * **WAIT:** The training is asynchronous. It takes time.
-    * **Retrieval:** After triggering training, you MUST call `get_latest_model_uri("NVDA")` again to get the NEW filename. 
-    * **Loop:** If `get_latest_model_uri` still returns "None" or the old model, wait and retry fetching the URI. Do NOT retrain.
+    1. ONLY trigger `ml_train_basket_model` AFTER `check_existing_dataset` returns a success message.
+    a. BOTH 'ml_feature_analysis' and `ml_train_basket_model` can only trigger ONCE only. DO NOT trigger twice.   
+    2. Enter the training polling loop:
+    a. Call `get_latest_model_uri` to check if the model is ready.
+    b. If the model is not found, repeat steps (a). 
 
-    **Phase 3: Strategy Backtesting (QA)**
-    * **Tool:** `backtest_model_strategy`
-    * **Mandatory Params:**
-        * `model_uri`: (The exact URI you retrieved in Phase 0 or Phase 2).
-        * `start_date`: "2024-01-01", `end_date`: "2024-12-31"
+    **Phase 3: Strategy Validation & Backtesting (QA Gate)**
+    1. Using the retrieved model URI, execute a vectorized backtest on the holdout test set. 
+    2. To guarantee zero data leakage, the backtest `start_date` MUST be strictly after the cutoff date established in Phase 1.
 
-    **FINAL VERDICT:**
-    * Provide the full Machine learning evaluation metrics
-    * Report the Accuracy and Sharpe Ratio.
-    * Provide your verdict *BUY/*SELL/*HOLD for NVDA based on the news sentiment, machine learning metrics and backtest result
-
-    **Technical error:**
-    * Report the exact technical error message to the user if there is any. 
+    **Final Output Format (Strategy Report):**
+    Do not output raw code or JSON. Structure your final response exactly as follows:
+    * **Model Performance (ML Metrics):** Test Accuracy, Precision (Up), Recall (Up), F1 Score, and total features used.
+    * **Financial Performance (Backtest Metrics):** Total Return, Win Rate, Sharpe Ratio, Max Drawdown, and Total Trades.
+    * **Feature Analysis:** Briefly identify the primary drivers of the model.
+    * **Verdict:** Explicitly state "DEPLOY" (e.g., if Sharpe > 1.5 and Precision > 55%) or "REJECT", along with a concise justification.
+    * **Technical Error** If you encounter any error during any circumstances, report to the user with exact error message.
     """
 
     # 4. Run Generation with Tools
