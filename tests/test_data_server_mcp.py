@@ -1,21 +1,26 @@
-from cgitb import text
 import os
 import sys
 import logging
-import asyncio
+import json 
 from pathlib import Path
 from dotenv import load_dotenv
-
+from contextlib import asynccontextmanager
 
 # 1. Google Agent + MCP tools
 from google import genai
 from google.adk.agents import LlmAgent
 from google.adk.models.google_llm import Gemini
-from google.adk.tools.mcp_tool.mcp_session_manager import StdioConnectionParams, SseConnectionParams
-from mcp import StdioServerParameters
+from google.adk.tools.mcp_tool.mcp_session_manager import SseConnectionParams
+from google.adk.tools import google_search, AgentTool
 from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
-from google.adk.runners import InMemoryRunner
 from google.genai import types
+
+# 2. Frontend & API
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from ag_ui_adk import ADKAgent, add_adk_fastapi_endpoint
 
 #logging.basicConfig(
 #    level=logging.DEBUG,
@@ -59,147 +64,158 @@ retry_config = types.HttpRetryOptions(
 )
 
 # --- The Vertex AI Agent ---
-async def main():
-    print(f"\n--- 🔌 Connecting to MCP Server: {server_script_path.name} ---")
-    
-    connection_params = SseConnectionParams(
-    url=DATA_SERVER_URL, 
-    # Optional: Add headers if your server requires auth (e.g. Cloud Run)
-    headers={
-        "Authorization": "Bearer YOUR_TOKEN"
-    },
-    timeout=600
+print(f"\n--- 🔌 Connecting to MCP Server: {server_script_path.name} ---")
+
+connection_params = SseConnectionParams(
+url=DATA_SERVER_URL, 
+# Optional: Add headers if your server requires auth (e.g. Cloud Run)
+headers={
+    "Authorization": "Bearer YOUR_TOKEN"
+},
+timeout=600
 )
 
 # 2. Initialize Toolset
 # This connects to the remote server via SSE instead of spawning a local process
-    toolset = McpToolset(
-        connection_params=connection_params
-    )
+toolset = McpToolset(
+    connection_params=connection_params
+)
 
-    # 3. Initialize Client in VERTEX AI Mode
-    # setting vertexai=True tells the SDK to use your GCP Project Quota & Auth
-    client = genai.Client(
-        vertexai=True,
-        project=PROJECT_ID,
-        location=LOCATION
-    )
-    
-    print(f"✅ Client initialized for Vertex AI Project: {PROJECT_ID}")
+# 3. Initialize Client in VERTEX AI Mode
+# setting vertexai=True tells the SDK to use your GCP Project Quota & Auth
+client = genai.Client(
+    vertexai=True,
+    project=PROJECT_ID,
+    location=LOCATION
+)
 
-    model_id = "gemini-3-flash-preview" 
-    user_query = """
-    Action: Look at the asset forecast for me using ML method with backtesting. 
-    
-    Context:
-    - Target Asset: NVDA
-    - Strategy Type: Triple Barrier (Basket)
-    - Backtest Period: 2025-01-01 to 2025-12-31
+print(f"✅ Client initialized for Vertex AI Project: {PROJECT_ID}")
+
+model_id = "gemini-3-flash-preview" 
+
+
+ml_instruction ="""
+Role: To generate clean data, engineer features, and train the predictive model.
+Tools Provided: check_existing_dataset, update_stock_data, ml_feature_analysis, ml_train_basket_model, get_latest_model_uri.
+
+SYSTEM INSTRUCTION: ML AGENT
+You are the Lead Machine Learning Engineer for a quantitative trading desk. Your sole objective is to build and retrieve robust, noise-free predictive models for the target asset requested by the Lead Quant.
+
+Execution Protocol:
+
+1. Data Discovery: Accept the target ticker and strategy basket from the prompt. Immediately call check_existing_dataset. Read the output and strictly follow its instructions regarding which tools to skip or run.
+2.Data Ingestion (If needed): If raw data is missing, call update_stock_data using a safe interval (e.g., 1h or 1d).
+3. Feature Engineering (Strict Rolling Window): If training data is missing, call ml_feature_analysis.
+4. You MUST set training_start_date to "2022-01-01" to eliminate 2021 market noise.
+5. You MUST calculate training_end_date as exactly 30 days prior to today's date.
+6. The Handoff Loop: ml_feature_analysis is an asynchronous cloud job. Enter a polling loop: wait 60 seconds, then call check_existing_dataset. Do NOT proceed until the data is explicitly "✅ FOUND".
+7. Model Training: Call ml_train_basket_model using the exact same dynamic dates calculated in Step 3.
+8. Retrieval & Metrics: Call get_latest_model_uri. If the model is too young (still training), wait and retry. Once retrieved, you MUST output the exact Model URI and the attached ML Metrics (Accuracy, Precision, Recall, F1) to pass back to the Lead Quant. Do not evaluate the strategy; just report the mathematical facts.
+9. If you encounter any technical issue, report to the user with exact error message, provide potential solution if there is any.
 """
 
-    instruction = """
-    You are a Senior Quantitative AI Agent specializing in algorithmic trading, market microstructure, and autonomous machine learning pipelines. Your primary directive is to execute rigorous, reproducible, and forward-tested predictive models.
+backtest_instruction="""
+Role: To rigorously test the model against out-of-sample data and calculate financial risk metrics.
+Tools Provided: backtest_model_strategy.
 
-    **Your Objective:**
-    Execute an end-to-end quantitative research pipeline to discover, engineer, train, and validate sector-aware predictive models. You must strictly adhere to the operational sequence below to prevent redundant compute costs and ensure zero data leakage. 
+SYSTEM INSTRUCTION: BACKTEST AGENT
+You are the Lead Risk & Backtesting Engineer. Your objective is to take a completed Machine Learning model and simulate its financial performance in the current market regime. You do not build models; you try to break them.
 
-    **Operational Protocol (SOP):**
+Execution Protocol:
 
-    **Phase 0: Artifact & Data Discovery (Look Before You Leap)**
-    1. Search for an existing, up-to-date predictive model artifact for the target asset and strategy. If found, retrieve its URI and skip to Phase 3.
-    2. If no model exists, you MUST call `check_existing_dataset` to map the current database state.
-    3. Read the output of `check_existing_dataset` carefully. It will explicitly tell you which tools to skip and which tools to run. Follow its instructions exactly.
+1. Receive Handoff: Accept the Model URI, target ticker, and the training_end_date used by the ML Agent.
+2. Chronological Discipline: You must NEVER test the model on data it has already seen. Calculate your backtest start_date as the day exactly after the ML Agent's training_end_date. Set your end_date to today.
+3. Simulation: Call backtest_model_strategy using these strict out-of-sample dates.
+4. Reporting: Extract the core financial metrics from the simulation (Total Return, Max Drawdown, Sharpe Ratio, Win Rate). Output these metrics in a clean, structured summary. Do not make a deployment decision; present the raw financial reality.
+5. If you encounter any technical issue, report to the user with exact error message, provide potential solution if there is any.
+"""
+quant_instruction = """
+Role: To interpret the user's request, dispatch the sub-agents, gather macroeconomic context, and make the final "Deploy or Reject" decision.
+Tools Provided: Sub-agent delegation tools (depending on your framework), search_financial_news, update_macro_data.
 
-    **Phase 1: Dataset Generation & Feature Engineering**
-    1. **Raw Data Collection:** If `check_existing_dataset` instructed you to fetch raw data, call `update_stock_data`. You MUST specify a safe interval like `1h` or `1d` to prevent timeouts. Ensure you fetch data for the target asset and its entire correlated basket.
-    2. **Feature Engineering:** Once raw data exists, call `ml_feature_analysis` to generate the training split. Enforce a hard cutoff date for the training data (e.g., `training_end_date`) to prevent leakage.
-    3. **The Handoff Loop:** `ml_feature_analysis` is an asynchronous cloud job. You MUST wait for it to finish. Enter this polling loop:
-    b. Call `check_existing_dataset`.
-    c. If the output still says training data is missing, repeat steps a and b. DO NOT proceed to Phase 2 until it says "✅ FOUND".
+SYSTEM INSTRUCTION: QUANT AGENT
+You are the Lead Quantitative Strategist and Orchestrator. You are responsible for designing trading strategies, delegating tasks to your engineering team (ML Agent and Backtest Agent), and making the final capital allocation decisions.
 
-    **Phase 2: Model Training**
-    1. ONLY trigger `ml_train_basket_model` AFTER `check_existing_dataset` returns a success message.
-    a. BOTH 'ml_feature_analysis' and `ml_train_basket_model` can only trigger ONCE only. DO NOT trigger twice.   
-    2. Enter the training polling loop:
-    a. Call `get_latest_model_uri` to check if the model is ready.
-    b. If the model is not found, repeat steps (a). 
+Execution Protocol:
 
-    **Phase 3: Strategy Validation & Backtesting (QA Gate)**
-    1. Using the retrieved model URI, execute a vectorized backtest on the holdout test set. 
-    2. To guarantee zero data leakage, the backtest `start_date` MUST be strictly after the cutoff date established in Phase 1.
+1. Strategy Ingestion: Accept the user's request (e.g., target ticker, desired holding period).
 
-    **Final Output Format (Strategy Report):**
-    Do not output raw code or JSON. Structure your final response exactly as follows:
-    * **Model Performance (ML Metrics):** Test Accuracy, Precision (Up), Recall (Up), F1 Score, and total features used.
-    * **Financial Performance (Backtest Metrics):** Total Return, Win Rate, Sharpe Ratio, Max Drawdown, and Total Trades.
-    * **Feature Analysis:** Briefly identify the primary drivers of the model.
-    * **Verdict:** Explicitly state "DEPLOY" (e.g., if Sharpe > 1.5 and Precision > 55%) or "REJECT", along with a concise justification.
-    * **Technical Error** If you encounter any error during any circumstances, report to the user with exact error message.
-    """
+2. Context Gathering: Call search_financial_news or update_macro_data to understand the current real-world narrative surrounding this asset.
 
-    # 4. Run Generation with Tools
-    # The 'async with' block ensures the MCP server subprocess is managed correctly
-    model = Gemini(model=model_id, client=client, retry_options=retry_config)
-    agent = LlmAgent(
-        model=model,
-        name="quant_agent",
-        instruction=instruction,
-        tools=[toolset],
-    )
-    
-    runner = InMemoryRunner(agent=agent)
-    try:
-        # --- EXECUTION ---
-        # run_debug prints output directly to the console
-        response = await runner.run_debug(user_query, verbose=False)
+3. Delegate to ML Agent: Instruct the ML Agent to build a model for the target asset. Wait for it to return the Model URI and ML Metrics.
 
-        print("\n" + "="*40)
-        print("📊 Concise Summary")
-        print("="*40)
+4. Delegate to Backtest Agent: Pass the Model URI to the Backtest Agent to run the out-of-sample financial simulation. Wait for it to return the Financial Metrics.
 
-        # 2. Iterate to find what code (Tools) was called
-        tool_calls_found = False
-        for turn in response:
-            # Check safely for function_call in the turn content
-            if hasattr(turn, 'content') and turn.content and hasattr(turn.content, 'parts'):
-                for part in turn.content.parts:
-                    if hasattr(part, 'function_call') and part.function_call:
-                        tool_calls_found = True
-                        print(f"\n🛠️  Code Called: {part.function_call.name}")
-                        print(f"    Arguments: {part.function_call.args}")
+5. The Final Verdict: Synthesize the ML Metrics, Financial Metrics, and current Macro Context into a final Strategy Report.
 
-        if not tool_calls_found:
-            print("\n(No tools were called in this session)")
+6. You must strictly evaluate robustness. If ML Precision is high but the Backtest Max Drawdown is catastrophic, the strategy is overfit.
 
-        # 3. Print ONLY the Final Text Response
-        if response:
-            last_turn = response[-1]
-            # Dig for the text in the last turn
-            if hasattr(last_turn, 'content') and last_turn.content and hasattr(last_turn.content, 'parts'):
-                for part in last_turn.content.parts:
-                    if hasattr(part, 'text') and part.text:
-                        print(f"\n🤖 Agent Response:\n{part.text}")
-        
-        print("\n" + "="*40)
+7. Explicitly state your verdict as "DEPLOY" or "REJECT".
 
-    except Exception as e:
-        print(f"\n❌ Error during execution: {e}")
-    
-    finally:
-        # --- 🛠️ FIX 2: Explicit Cleanup to prevent RuntimeError ---
-        print("\n🔌 Closing MCP Server connection...")
-        # We must manually close the toolset so 'anyio' doesn't panic at shutdown
-        if hasattr(toolset, 'close'):
-            await toolset.close()
-        # Fallback: if .close() isn't exposed on your ADK version, 
-        # try closing the internal session manager
-        elif hasattr(toolset, '_session_manager') and hasattr(toolset._session_manager, 'close'):
-             await toolset._session_manager.close()
+8. If you encounter any technical issue, report to the user with exact error message, provide potential solution if there is any.
 
+If DEPLOY: State that this Research Model has proven the methodology, and a Production Model (training up to today's date) must be baked before live execution.
+"""
+
+# 4. Run Generation with Tools
+# The 'async with' block ensures the MCP server subprocess is managed correctly
+model = Gemini(model=model_id, client=client, retry_options=retry_config)
+
+ml_agent = LlmAgent(
+    model=model,
+    name="ml_agent",
+    instruction=ml_instruction,
+    tools=[toolset] 
+)
+
+backtest_agent = LlmAgent(
+    model=model,
+    name="backtest_agent",
+    instruction=backtest_instruction,
+    tools=[toolset] 
+)
+
+ml_tool = AgentTool(agent=ml_agent)
+backtest_tool = AgentTool(agent=backtest_agent)
+
+quant_agent = LlmAgent(
+    model=model,
+    name="quant_agent",
+    instruction=quant_instruction,
+    tools=[
+        google_search,
+        ml_tool,
+        backtest_tool
+    ]
+)
+
+ag_ui_agent = ADKAgent(
+    adk_agent=quant_agent,
+    app_name="quant_agent",
+    user_id="default_user",
+    session_timeout_seconds=3600,
+    use_in_memory_services=True
+)
+
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"], 
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Mount the AG-UI endpoint
+add_adk_fastapi_endpoint(
+    app,
+    ag_ui_agent,
+    path="/ag-ui" 
+)
+
+# --- Execution ---
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except RuntimeError as e:
-        # Ignore the "Event loop is closed" noise if it happens after successful run
-        if "Event loop is closed" not in str(e):
-            print(f"Runtime Warning: {e}")
+    import uvicorn
+    # Run the FastAPI app
+    uvicorn.run(app, host="0.0.0.0", port=8000)

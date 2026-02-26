@@ -1,8 +1,4 @@
-langgraph
-langchain-google-genai>=2.0.0
 google-auth
-langchain-core
-langchain-community
 ib_insync           # Python wrapper for IBKR
 pandas
 pandas_market_calendars
@@ -37,3 +33,7 @@ xgboost
 scikit-learn
 scipy
 joblib
+
+#Requirement for frontend 
+fastapi
+ag-ui-adk
