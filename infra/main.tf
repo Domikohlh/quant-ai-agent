@@ -14,7 +14,7 @@ terraform {
 # ---------------------------------------------------------
 
 provider "google" {
-  project = "quant-ai-agent-482111" # <--- REPLACE THIS
+  project = var.project_id 
   region  = "us-central1"
   zone    = "us-central1-a"
 }
@@ -59,7 +59,7 @@ resource "google_cloud_run_service_iam_member" "scheduler_invoker" {
 }
 
 resource "google_firestore_database" "default" {
-  project     = "quant-ai-agent-482111"
+  project     = var.project_id
   name        = "(default)"
   location_id = "us-central1"
   type        = "FIRESTORE_NATIVE"

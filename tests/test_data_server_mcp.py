@@ -68,7 +68,6 @@ print(f"\n--- 🔌 Connecting to MCP Server: {server_script_path.name} ---")
 
 connection_params = SseConnectionParams(
 url=DATA_SERVER_URL, 
-# Optional: Add headers if your server requires auth (e.g. Cloud Run)
 headers={
     "Authorization": "Bearer YOUR_TOKEN"
 },

@@ -1,58 +1,51 @@
-# Quant AI Agent 🚀
+# Quant AI Agent
 
-**A Multi-Agent System for Quantitative Finance on GCP**
+An enterprise-grade, autonomous quantitative trading research system powered by Large Language Models (LLMs), FastMCP, and Google Cloud. 
 
-`quant_AI_agent` is an autonomous trading system built with **LangGraph** and **Google Gemini** models. It orchestrates specialized AI agents to analyze market data, assess sentiment, manage risk, and execute trades via Interactive Brokers.
+This system utilizes a multi-agent architecture to research, engineer, train, and validate algorithmic trading strategies using strict chronological out-of-sample testing and machine learning.
 
----
+## 🚀 Current Status
+* **Backend & ML Pipeline:** **Fully Operational.** The core infrastructure (BigQuery, Cloud Run, GCS) and the asynchronous machine learning pipeline (Triple Barrier Labeling, XGBoost, Backtesting) are successfully deployed and functional.
+* **Frontend:** **Work in Progress (WIP).** A Next.js-based web interface is currently under development to provide live charting and a Copilot chat interface.
 
-## 🏗 Architecture
+## Improvements
+* **Machine Learning Parameters **(Full Automation):**** The current infrastructure is running, but it lacks of dynamic and flexibility.
+* **Backtesting Optimisation** The backtesting is working but lack of sophistication on handling complex patterns, leading to a mostly failed strategies. 
 
-The system operates on a **Hub-and-Spoke** graph architecture:
+## 🧠 System Architecture
 
-1.  **Supervisor (Gemini 3.0 Pro):** Orchestrates workflow and handles errors.
-2.  **Data Engineer (Gemini 2.5 Flash):** Fetches OHLCV, VIX, and macro data.
-3.  **Sentiment Analyst (Gemini 3.0 Flash):** Scans news/tweets with massive context window.
-4.  **Quant Analyst (Gemini 3.0 Pro):** Calculates indicators & generates signals.
-5.  **Risk Manager (Gemini 3.0 Pro):** Validates signals against portfolio constraints.
-6.  **Executor (Gemini 2.5 Flash):** Handles order execution (TWAP/VWAP) with Human-in-the-Loop.
+The system enforces a strict Separation of Concerns using a **Three-Agent Architecture**:
 
-**Infrastructure:**
-* **Compute:** Google Cloud Run (Agents) + Compute Engine (IB Gateway/MCP).
-* **Database:** SQLite (via MCP) for trade logs.
-* **Observability:** LangSmith.
+1. **The Quant Agent (Orchestrator):** Ingests user requests, gathers macroeconomic context (FRED, Financial News), delegates tasks to sub-agents, and makes the final "Deploy or Reject" capital allocation decision.
+2. **The ML Agent (Builder):** Operates securely via Model Context Protocol (MCP). It handles data ingestion, dynamic rolling-window feature engineering, and triggers asynchronous Google Cloud Run jobs to train XGBoost models.
+3. **The Backtest Agent (Validator):** Tests the completed models on strictly unseen, out-of-sample chronological data to calculate true financial risk metrics (Sharpe, Max Drawdown, Total Return) without data leakage.
 
----
+### Cloud Infrastructure
+* **Google Cloud Run:** Executes heavy, long-running ML jobs asynchronously to prevent agent timeouts.
+* **Google BigQuery:** Serves as the central data warehouse for raw market data, technical indicators, and chronologically split training/testing datasets.
+* **Google Cloud Storage (GCS):** Stores compiled `.joblib` models. Employs a "Metadata Sidecar" pattern to stamp true ML metrics directly onto the file for seamless agent retrieval.
+* **Cloud SQL & Firestore:** Manages transaction logging and agent thought tracing.
 
-## ⚡️ Quick Start
+## 📂 Project Structure
 
-### Prerequisites
-* Python 3.11+
-* Google Cloud Project (with Vertex AI API enabled)
-* Interactive Brokers Account (Paper Trading recommended)
-* LangSmith API Key
-
-### Installation
-
-1.  **Clone the repository:**
-    ```bash
-    git clone [https://github.com/your-username/quant_AI_agent.git](https://github.com/your-username/quant_AI_agent.git)
-    cd quant_AI_agent
-    ```
-
-2.  **Install dependencies:**
-    ```bash
-    pip install -r requirements.txt
-    ```
-
-3.  **Configure Environment:**
-    Copy `.env.example` to `.env` and fill in your keys:
-    ```bash
-    cp .env.example .env
-    ```
-
-### Usage
-
-**Run locally (Development):**
-```bash
-python main.py --mode=dev
+```text
+├── agents/                 # Multi-agent routing and prompt definitions
+├── core/
+│   └── database.py         # GCP connections (BigQuery, GCS, SQL, Firestore) & Garbage Collection
+├── frontend/               # Next.js web application (WIP)
+│   ├── app/                # Next.js App Router (pages, layouts, API routes)
+│   └── ...
+├── helpers/                # Core quantitative and machine learning logic
+│   ├── backtest_helper.py  # Vectorized backtesting engine
+│   ├── data_helper.py      # YFinance/FRED ingestion and indicator calculation
+│   └── ml_helper.py        # Triple Barrier Labeling, Clustering, XGBoost training
+├── infra/                  # Infrastructure as Code
+│   ├── Dockerfile          # Container definition for Cloud Run ML jobs
+│   └── main.tf             # Terraform configuration for GCP resources
+├── mcp_server/             # Model Context Protocol (MCP) server
+│   ├── data_server.py      # FastMCP tools exposed to the AI Agents
+│   └── training_logic.py   # CLI entrypoint for asynchronous Cloud Run ML jobs
+├── tests/
+│   └── test_data_server_mcp.py # Local ADK agent testing and pipeline execution
+├── main.py                 # Primary entry point for the local system
+└── requirements.txt        # Python dependencies

@@ -10,6 +10,8 @@ import sqlalchemy
 from sqlalchemy import text
 import joblib
 
+# Need to remove the Cloud SQL running, instead, use firestore and bigquery 
+
 logger = logging.getLogger(__name__)
 
 class DatabaseManager:
@@ -25,27 +27,27 @@ class DatabaseManager:
         self.storage_client = storage.Client(project=project_id)
         
         # 3. Cloud SQL Connection (Transactions)
-        self.sql_instance = sql_instance_name # Format: "project:region:instance"
-        self.sql_db = sql_db_name
-        self.sql_connector = Connector()
-        self.pool = self._init_sql_pool()
+        #self.sql_instance = sql_instance_name # Format: "project:region:instance"
+        #self.sql_db = sql_db_name
+        #self.sql_connector = Connector()
+        #self.pool = self._init_sql_pool()
 
-    def _init_sql_pool(self):
-        """Creates a SQLAlchemy pool using the Cloud SQL Connector."""
-        def getconn():
-            conn = self.sql_connector.connect(
-                self.sql_instance,
-                "pg8000",
-                user=os.environ.get("DB_USER"),
-                password=os.environ.get("DB_PASS"),
-                db=self.sql_db
-            )
-            return conn
+    #def _init_sql_pool(self):
+    #    """Creates a SQLAlchemy pool using the Cloud SQL Connector."""
+    #    def getconn():
+    #        conn = self.sql_connector.connect(
+    #            self.sql_instance,
+    #            "pg8000",
+    #            user=os.environ.get("DB_USER"),
+    #            password=os.environ.get("DB_PASS"),
+    #            db=self.sql_db
+            #)
+     #       return conn
 
-        return sqlalchemy.create_engine(
-            "postgresql+pg8000://",
-            creator=getconn,
-        )
+      #  return sqlalchemy.create_engine(
+       #     "postgresql+pg8000://",
+        #    creator=getconn,
+        #)
 
     # --- Helper: Save Market Data ---
     def save_market_data(self, df, table_id="market_data.history"):
