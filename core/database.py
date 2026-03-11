@@ -156,18 +156,28 @@ class DatabaseManager:
         doc_ref.set(thought_data)
         logger.info("Logged agent thought: %s", doc_ref.id)
 
-    # --- Helper: Save Transaction ---
+    # --- Helper: Save Transaction (Updated for Firestore) ---
     def save_transaction(self, transaction_data: dict):
-        """Saves a trade to PostgreSQL."""
-        # Note: In production, use ORM like SQLAlchemy Session. Here is raw SQL for clarity.
-        stmt = text("""
-            INSERT INTO transactions (order_id, agent_id, symbol, side, quantity, price, status, timestamp)
-            VALUES (:order_id, :agent_id, :symbol, :side, :quantity, :price, :status, :timestamp)
-        """)
-        with self.pool.connect() as db_conn:
-            db_conn.execute(stmt, transaction_data)
-            db_conn.commit()
-        logger.info("Saved transaction: %s", transaction_data.get("order_id"))
+        """Saves a trade to Firestore instead of PostgreSQL."""
+        try:
+            # If the trade has an order_id, we use it as the Firestore Document ID
+            order_id = transaction_data.get("order_id")
+            
+            if order_id:
+                doc_ref = self.firestore_client.collection("transactions").document(str(order_id))
+            else:
+                # Let Firestore auto-generate an ID if one isn't provided
+                doc_ref = self.firestore_client.collection("transactions").document()
+            
+            # Firestore requires datetime objects, ensure timestamp is compatible
+            # (Assuming transaction_data['timestamp'] is already a datetime object or string)
+            
+            doc_ref.set(transaction_data)
+            logger.info("Saved transaction to Firestore: %s", doc_ref.id)
+            
+        except Exception as e:
+            logger.error(f"Failed to save transaction to Firestore: {e}")
+            raise e
 
     def create_tables(self):
         """Creates the necessary tables if they don't exist."""
