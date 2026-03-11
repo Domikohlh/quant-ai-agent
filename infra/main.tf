@@ -14,7 +14,7 @@ terraform {
 # ---------------------------------------------------------
 
 provider "google" {
-  project = "YOUR_PROJECT_ID" # <--- REPLACE THIS
+  project = "quant-ai-agent-482111" # <--- REPLACE THIS
   region  = "us-central1"
   zone    = "us-central1-a"
 }
@@ -26,7 +26,9 @@ resource "google_project_service" "enabled_apis" {
     "run.googleapis.com",
     "cloudscheduler.googleapis.com",
     "iam.googleapis.com",
-    "artifactregistry.googleapis.com"
+    "artifactregistry.googleapis.com",
+    "firestore.googleapis.com", 
+    "bigquery.googleapis.com"
   ])
   service            = each.key
   disable_on_destroy = false
@@ -54,6 +56,13 @@ resource "google_cloud_run_service_iam_member" "scheduler_invoker" {
   name     = google_cloud_run_v2_service.agent_service.name
   role     = "roles/run.invoker"
   member   = "serviceAccount:${google_service_account.agent_sa.email}"
+}
+
+resource "google_firestore_database" "default" {
+  project     = "quant-ai-agent-482111"
+  name        = "(default)"
+  location_id = "us-central1"
+  type        = "FIRESTORE_NATIVE"
 }
 
 # ---------------------------------------------------------
