@@ -6,25 +6,22 @@ import "@copilotkit/react-ui/styles.css";
 
 export default function Home() {
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center p-24 bg-gray-50">
-      <div className="z-10 w-full max-w-5xl items-center justify-center font-mono text-sm flex">
+    // We replace the <main> with a strict screen-sized flex container
+    <div className="flex h-screen w-full flex-col bg-gray-50">
+      <CopilotKit runtimeUrl="/api/copilotkit" agent="quant_agent">
         
-        {/* Change the agent name to "default" right here 👇 */}
-        <CopilotKit runtimeUrl="/api/copilotkit" agent="quant_agent">
-          
-          <div className="w-full max-w-2xl h-[600px] border border-gray-200 rounded-lg shadow-lg overflow-hidden bg-white">
-            <CopilotChat 
-              instructions="You are assisting the user via the dashboard."
-              labels={{
-                title: "Quant AI Assistant",
-                initial: "Hello! The MCP server is connected. What would you like to analyze?",
-              }}
-            />
-          </div>
-          
-        </CopilotKit>
-
-      </div>
-    </main>
+        {/* We removed the 600px wrapper div entirely. 
+            className="h-full w-full" tells CopilotKit to fill the screen and manage its own scrollbar */}
+        <CopilotChat 
+          instructions="You are assisting the user via the dashboard."
+          labels={{
+            title: "Quant AI Assistant",
+            initial: "Hello! The MCP server is connected. What would you like to analyze?",
+          }}
+          className="h-full w-full"
+        />
+        
+      </CopilotKit>
+    </div>
   );
 }

@@ -6,6 +6,18 @@ from pathlib import Path
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
 
+import copy  # <--- NEW
+import io    # <--- NEW
+
+# --- FIX FOR ADK DEEPCOPY CRASH ---
+# Prevents Python from panicking when ag_ui_adk tries to duplicate 
+# active terminal streams or internal loggers for a new chat session.
+copy._deepcopy_dispatch[io.TextIOWrapper] = lambda x, memo: x
+
+# (Optional safeguard for httpx network locks, which sometimes fail next)
+import threading
+copy._deepcopy_dispatch[type(threading.Lock())] = lambda x, memo: x
+
 # 1. Google Agent + MCP tools
 from google import genai
 from google.adk.agents import LlmAgent
@@ -183,16 +195,16 @@ quant_agent = LlmAgent(
     name="quant_agent",
     instruction=quant_instruction,
     tools=[
-        google_search,
         ml_tool,
-        backtest_tool
+        backtest_tool,
+        google_search
     ]
 )
 
 ag_ui_agent = ADKAgent(
     adk_agent=quant_agent,
     app_name="quant_agent",
-    user_id="default_user",
+    user_id="dom_user",
     session_timeout_seconds=3600,
     use_in_memory_services=True
 )
