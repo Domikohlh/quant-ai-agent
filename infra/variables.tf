@@ -1,4 +1,4 @@
 variable "project_id" {
-  description = "The GCP Project ID"
+  description = "quant-ai-agent-482111"
   type        = string
 }

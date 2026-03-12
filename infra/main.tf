@@ -10,7 +10,7 @@ terraform {
 }
 
 # ---------------------------------------------------------
-# 1. PROVIDER & VARIABLES
+# 1. PROVIDER
 # ---------------------------------------------------------
 
 provider "google" {
@@ -22,7 +22,6 @@ provider "google" {
 # Enable necessary APIs automatically
 resource "google_project_service" "enabled_apis" {
   for_each = toset([
-    "compute.googleapis.com",
     "run.googleapis.com",
     "cloudscheduler.googleapis.com",
     "iam.googleapis.com",
@@ -35,14 +34,8 @@ resource "google_project_service" "enabled_apis" {
 }
 
 # ---------------------------------------------------------
-# 2. SERVICE ACCOUNTS
+# 2. SERVICE ACCOUNTS & IAM
 # ---------------------------------------------------------
-
-# Service Account for the VM (IB Gateway & Database)
-resource "google_service_account" "vm_sa" {
-  account_id   = "quant-vm-sa"
-  display_name = "Quant Agent VM Service Account"
-}
 
 # Service Account for Cloud Run (The Agents)
 resource "google_service_account" "agent_sa" {
@@ -51,12 +44,17 @@ resource "google_service_account" "agent_sa" {
 }
 
 # Allow Scheduler to invoke Cloud Run
-resource "google_cloud_run_service_iam_member" "scheduler_invoker" {
+resource "google_cloud_run_v2_service_iam_member" "scheduler_invoker" {
+  project  = google_cloud_run_v2_service.agent_service.project
   location = google_cloud_run_v2_service.agent_service.location
   name     = google_cloud_run_v2_service.agent_service.name
   role     = "roles/run.invoker"
   member   = "serviceAccount:${google_service_account.agent_sa.email}"
 }
+
+# ---------------------------------------------------------
+# 3. FIRESTORE DATABASE (Serverless State)
+# ---------------------------------------------------------
 
 resource "google_firestore_database" "default" {
   project     = var.project_id
@@ -66,62 +64,8 @@ resource "google_firestore_database" "default" {
 }
 
 # ---------------------------------------------------------
-# 3. COMPUTE ENGINE (The "Always On" Brain)
+# 4. CLOUD RUN (The Agent Engine)
 # ---------------------------------------------------------
-# Cost: ~$14/mo (e2-small). Hosts IB Gateway & SQLite.
-
-resource "google_compute_instance" "ib_gateway_vm" {
-  name         = "quant-ib-gateway"
-  machine_type = "e2-small"
-  zone         = "us-central1-a"
-
-  boot_disk {
-    initialize_params {
-      image = "debian-cloud/debian-12"
-      size  = 20 # GB
-    }
-  }
-
-  network_interface {
-    network = "default"
-    access_config {
-      # Ephemeral public IP so you can SSH in to install IBKR
-    }
-  }
-
-  service_account {
-    email  = google_service_account.vm_sa.email
-    scopes = ["cloud-platform"]
-  }
-
-  metadata_startup_script = <<-EOT
-    #! /bin/bash
-    apt-get update
-    apt-get install -y docker.io git
-    # Setup for MCP Servers (SQLite) can go here later
-  EOT
-
-  tags = ["ib-gateway", "ssh-server"]
-}
-
-# Firewall: Allow SSH to the VM
-resource "google_compute_firewall" "allow_ssh" {
-  name    = "allow-ssh-quant"
-  network = "default"
-
-  allow {
-    protocol = "tcp"
-    ports    = ["22"]
-  }
-
-  source_ranges = ["0.0.0.0/0"] # WARNING: Limit this to your IP for security later
-  target_tags   = ["ssh-server"]
-}
-
-# ---------------------------------------------------------
-# 4. CLOUD RUN (The Agent Loop)
-# ---------------------------------------------------------
-# Cost: Pay-per-use. Hosts LangGraph.
 
 resource "google_cloud_run_v2_service" "agent_service" {
   name     = "quant-ai-agent-service"
@@ -130,9 +74,7 @@ resource "google_cloud_run_v2_service" "agent_service" {
 
   template {
     containers {
-      # PLACEHOLDER IMAGE: Using hello-world initially. 
-      # Once you have your Dockerfile ready, you will build and push 
-      # your image to GCR, then update this line.
+      # Replace this with your actual Docker image URI when you build it
       image = "us-docker.pkg.dev/cloudrun/container/hello"
       
       resources {
@@ -144,9 +86,8 @@ resource "google_cloud_run_v2_service" "agent_service" {
       
       env {
         name  = "GCP_PROJECT_ID"
-        value = "YOUR_PROJECT_ID"
+        value = var.project_id
       }
-      # Add other ENV vars here (API Keys should go in Secret Manager ideally)
     }
     
     service_account = google_service_account.agent_sa.email
@@ -169,7 +110,6 @@ resource "google_cloud_scheduler_job" "active_mode" {
     http_method = "POST"
     uri         = google_cloud_run_v2_service.agent_service.uri
     
-    # Body payload tells the agent which mode to run
     body = base64encode("{\"mode\": \"active\"}")
 
     oidc_token {
