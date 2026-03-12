@@ -179,29 +179,6 @@ class DatabaseManager:
             logger.error(f"Failed to save transaction to Firestore: {e}")
             raise e
 
-    def create_tables(self):
-        """Creates the necessary tables if they don't exist."""
-        # Define the SQL schema
-        create_transactions_table = text("""
-            CREATE TABLE IF NOT EXISTS transactions (
-                order_id VARCHAR(50) PRIMARY KEY,
-                agent_id VARCHAR(50),
-                symbol VARCHAR(10),
-                side VARCHAR(10),
-                quantity DECIMAL,
-                price DECIMAL,
-                status VARCHAR(20),
-                timestamp TIMESTAMP,
-                fees DECIMAL DEFAULT 0.0
-            );
-        """)
-        
-        # Execute it
-        with self.pool.connect() as db_conn:
-            db_conn.execute(create_transactions_table)
-            db_conn.commit()
-        logger.info("Tables verified/created successfully.")
-
     def get_latest_record_info(self, table_id: str, ticker: str):
         """
         Inspects the BigQuery table to find the date column name and the 
