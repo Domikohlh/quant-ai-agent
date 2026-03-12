@@ -1,6 +1,6 @@
 # Quant AI Agent
 
-An enterprise-grade, autonomous quantitative trading research system powered by Large Language Models (LLMs), FastMCP, and Google Cloud. 
+An autonomous quantitative trading research system powered by Large Language Models (LLMs), FastMCP, and Google Cloud. 
 
 This system utilizes a multi-agent architecture to research, engineer, train, and validate algorithmic trading strategies using strict chronological out-of-sample testing and machine learning.
 

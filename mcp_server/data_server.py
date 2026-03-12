@@ -476,6 +476,31 @@ def get_latest_model_uri(ticker: str) -> str:
     """
     try:
         db = _get_db()
+        
+        # --- 1. Check Firestore for the Latest Training Receipt ---
+        doc_ref = db.firestore_client.collection("training_jobs").document(f"{ticker}_latest")
+        doc = doc_ref.get()
+        
+        if doc.exists:
+            receipt = doc.to_dict()
+            receipt_time = datetime.fromisoformat(receipt["timestamp"])
+            now = datetime.now(receipt_time.tzinfo)
+            age_in_minutes = (now - receipt_time).total_seconds() / 60
+            
+            # If the receipt is fresh (< 15 mins old) and it was REJECTED
+            if age_in_minutes < 15 and receipt.get("status") == "rejected":
+                # Clear the document so we don't accidentally read it on the next loop
+                doc_ref.delete() 
+                
+                return (
+                    f"❌ QA THRESHOLD FAILED: The recent training job completed, but accuracy was <= 50%. "
+                    f"The model was NOT saved to GCS.\n\n"
+                    f"--- FAILED METRICS ---\n{json.dumps(receipt, indent=2)}\n\n"
+                    f"INSTRUCTION: DO NOT proceed to the Backtest Agent. You must adjust your hyperparameters "
+                    f"(e.g., change n_estimators, learning_rate, or max_depth) and call `ml_train_basket_model` again."
+                )
+
+        # --- 2. Check GCS for Success (Existing Logic) ---
         project_id = os.getenv("GCP_PROJECT_ID")
         bucket_name = os.getenv("GCS_MODEL_BUCKET", f"{project_id}-models")
         bucket = db.storage_client.bucket(bucket_name)
@@ -484,37 +509,26 @@ def get_latest_model_uri(ticker: str) -> str:
         matching_blobs = [b for b in blobs if ticker in b.name and b.name.endswith(".joblib")]
         
         if not matching_blobs:
-            return f"Error: No models found for {ticker}."
+            return f"⏳ STILL TRAINING: No models found for {ticker} yet. Wait 60 seconds and try again."
 
         # Sort by time (Newest First)
         matching_blobs.sort(key=lambda x: x.time_created, reverse=True)
         latest_blob = matching_blobs[0]
         
-        # --- FIX: The Race Condition Time Gate ---
-        from datetime import datetime, timezone
-        now = datetime.now(timezone.utc)
-        age_in_minutes = (now - latest_blob.time_created).total_seconds() / 60
+        now_utc = datetime.now(latest_blob.time_created.tzinfo)
+        blob_age_minutes = (now_utc - latest_blob.time_created).total_seconds() / 60
         
-        # If the newest model is older than 15 minutes, the Cloud Run job hasn't finished saving the new one yet.
-        if age_in_minutes > 15:
-            return (
-                f"⏳ STILL TRAINING: The newest model found is {int(age_in_minutes)} minutes old. "
-                f"The background incremental training job has not finished yet. "
-                f"Do NOT proceed. Wait 60 seconds and call this tool again."
-            )
+        if blob_age_minutes > 15:
+            return f"⏳ STILL TRAINING: The newest model found is {int(blob_age_minutes)} minutes old. Wait 60 seconds."
 
-        # --- FIX: Retrieve Metadata ---
-        # GCS requires reloading the blob to fetch custom metadata
         latest_blob.reload() 
-        metrics_text = json.dumps(latest_blob.metadata, indent=2) if latest_blob.metadata else "No metrics found attached to model."
-        
+        metrics_text = json.dumps(latest_blob.metadata, indent=2) if latest_blob.metadata else "No metrics found."
         uri = f"gs://{bucket_name}/{latest_blob.name}"
         
         return (
             f"✅ FOUND LATEST MODEL: {uri}\n\n"
-            f"--- TRUE ML METRICS ---\n"
-            f"{metrics_text}\n\n"
-            f"INSTRUCTION: Model retrieval successful. Proceed immediately to Phase 3 (backtest_model_strategy) using this URI."
+            f"--- TRUE ML METRICS ---\n{metrics_text}\n\n"
+            f"INSTRUCTION: Model passed QA and retrieval was successful. Proceed immediately to Backtest Agent."
         )
             
     except Exception as e:
@@ -593,15 +607,28 @@ def ml_feature_analysis(
         return f"Error triggering Cloud Job: {e}"
 
 @mcp.tool()
-def ml_train_basket_model(target_ticker: str, run_remote: bool = True, training_end_date: str="2024-12-31",) -> str:
+def ml_train_basket_model(
+    target_ticker: str,
+     run_remote: bool = True, 
+     training_end_date: str="2024-12-31",
+     custom_params: dict=None
+     ) -> str:
     """
     [STEP 2 of Pipeline]
     Trains an XGBoost classifier using the datasets created by 'ml_feature_analysis'.
-    **CRITICAL * ONLY RUN THIS FUNCTION ONCE.
+    
+    QA GATE & AUTO-TUNING LOGIC:
+    - The model MUST achieve >50% test accuracy to pass the QA Gate.
+    - If it fails, it will be rejected and will NOT be saved to GCS.
+    - If your previous attempt was rejected, you MUST use the `custom_params` dictionary 
+      to provide new hyperparameters and retry. 
+    - Valid keys for custom_params: 'n_estimators' (int), 'learning_rate' (float), 'max_depth' (int).
     
     Args:
-        target_ticker: The stock ticker to train the model for (must match the ticker used in Step 1).
+        target_ticker: The stock ticker to train the model for.
         run_remote: Always set to True to run on Cloud Run Jobs.
+        training_end_date: The chronological split date.
+        custom_params: A dictionary of XGBoost hyperparameters to override the defaults. {'n_estimators': 200, 'learning_rate': 0.05, 'max_depth': 5, 'objective': 'binary:logistic', 'eval_metric': 'logloss'}
     """
     project_id = os.getenv("GCP_PROJECT_ID")
     region = os.getenv("GCP_COMPUTE_REGION", "us-central1")
@@ -614,27 +641,40 @@ def ml_train_basket_model(target_ticker: str, run_remote: bool = True, training_
         return json.dumps(result, indent=2)
 
     try:
-        # Trigger Cloud Run Job
+
         endpoint = f"{region}-run.googleapis.com"
         client = run_v2.JobsClient(
             client_options=client_options.ClientOptions(api_endpoint=endpoint)
         )
+        
+        # Base arguments
+        args = [
+            "python", "mcp_server/training_logic.py", 
+            "--task", "train",
+            "--ticker", target_ticker, 
+            "--bucket", bucket_name,
+            "--training_end_date", training_end_date
+        ]
+        
+        # Safely pass the dictionary as a JSON string to the CLI
+        if custom_params:
+            args.extend(["--custom_params", json.dumps(custom_params)])
+
         request = run_v2.RunJobRequest(
             name=f"projects/{project_id}/locations/{region}/jobs/{job_name}",
             overrides={
                 "container_overrides": [{
-                    "args": ["python", 
-                    "mcp_server/training_logic.py", 
-                    "--task", "train",
-                    "--ticker", target_ticker, 
-                    "--bucket", bucket_name,
-                    "--training_end_date", training_end_date
-                    ]
+                    "args": args
                 }]
             }
         )
         operation = client.run_job(request=request)
-        return f"🚀 Training Job triggered for {target_ticker}. Saving to {bucket_name}. (Async execution started)"
+        
+        param_msg = f" using params: {custom_params}" if custom_params else " using default params."
+        return f"🚀 Training Job triggered for {target_ticker}{param_msg} Saving to {bucket_name}. (Async execution started)"
+
+    except Exception as e:
+        return f"Error triggering Cloud Run Job: {e}"
 
     except Exception as e:
         return f"Error triggering Cloud Run Job: {e}"

@@ -209,7 +209,7 @@ def run_feature_analysis_core(
         logger.error(f"Core Analysis failed: {e}")
         return json.dumps({"status": "error", "message": f"Core analysis error: {str(e)}"})
 
-def train_basket_model_core(target_ticker: str, save_bucket: str, training_end_date: str="2024-12-31"):
+def train_basket_model_core(target_ticker: str, save_bucket: str, training_end_date: str="2024-12-31", custom_params: dict=None):
     """
     The actual training logic (Heavy Lifting).
     Run this inside the Cloud Run Job.
@@ -254,9 +254,15 @@ def train_basket_model_core(target_ticker: str, save_bucket: str, training_end_d
             'learning_rate': 0.05,        # Slower learning for robustness
             'max_depth': 5,
             'objective': 'binary:logistic',
-            'eval_metric': 'logloss',
-            'use_label_encoder': False
+            'eval_metric': 'logloss'
         }
+
+        if custom_params:
+            # Filter out None values just in case
+            valid_params = {k: v for k, v in custom_params.items() if v is not None}
+            default_params.update(valid_params)
+            logger.info(f"Using Agent parameters: {default_params}")
+
         import xgboost as xgb
 
         # 3. Train/Recall model
@@ -279,32 +285,55 @@ def train_basket_model_core(target_ticker: str, save_bucket: str, training_end_d
                 
         # 5. Metrics
         preds = model.predict(X_test)
-
         from sklearn.metrics import accuracy_score, classification_report
+
+        test_accuracy = accuracy_score(y_test, preds)
         report = classification_report(y_test, preds, labels=[0, 1], output_dict=True, zero_division=0)
         up_metrics = report.get('1', {})
         
-        # Create a dictionary of strings for GCS Metadata compatibility
+        # 2. THE QA GATE (Your save_model logic)
+        save_model = False
+        if test_accuracy > 0.50:
+            save_model = True
+
+        # Build the shared dictionary
         metrics_dict = {
+            "timestamp": datetime.now().isoformat(),
             "features_used": str(len(features)),
             "model_type": "XGBoost (Basket Trained)",
-            "test_accuracy": str(round(accuracy_score(y_test, preds), 4)),
+            "test_accuracy": str(round(test_accuracy, 4)),
             "precision_up": str(round(up_metrics.get('precision', 0.0), 4)),
             "recall_up": str(round(up_metrics.get('recall', 0.0), 4)),
             "f1_up": str(round(up_metrics.get('f1-score', 0.0), 4))
         }
 
-        # 5. Save to GCS (Binary + Metadata)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-        filename = f"models/{target_ticker}_basket_{timestamp}.joblib"
-        
-        # Pass the metrics_dict to the updated save function
-        gcs_path = db.save_model_to_gcs(model, save_bucket, filename, metadata=metrics_dict)
-        
-        metrics_dict["status"] = "success"
-        metrics_dict["model_path"] = gcs_path
-        
-        return json.dumps(metrics_dict, default=json_serial, indent=2)
+        # 3. Handle Success vs Rejection
+        if save_model:
+            timestamp_str = datetime.now().strftime("%Y%m%d_%H%M")
+            filename = f"models/{target_ticker}_basket_{timestamp_str}.joblib"
+            
+            # Save the physical model to GCS
+            gcs_path = db.save_model_to_gcs(model, save_bucket, filename, metadata=metrics_dict)
+            
+            metrics_dict["status"] = "success"
+            metrics_dict["message"] = "Model passed QA gate (>50% accuracy) and was saved to GCS."
+            metrics_dict["model_path"] = gcs_path
+        else:
+            # DO NOT save to GCS
+            metrics_dict["status"] = "rejected"
+            metrics_dict["message"] = "Model failed QA gate (accuracy <= 50%). Model was NOT saved to GCS."
+            metrics_dict["model_path"] = None
+
+        # 4. Save the "Training Receipt" to Firestore so the Agent can read the status asynchronously
+        try:
+            doc_ref = db.firestore_client.collection("training_jobs").document(f"{target_ticker}_latest")
+            doc_ref.set(metrics_dict)
+            logger.info(f"Saved training receipt to Firestore. Status: {metrics_dict['status']}")
+        except Exception as e:
+            logger.error(f"Failed to save training receipt to Firestore: {e}")
+
+        # Return dict (Useful if running synchronously/locally)
+        return json.dumps(metrics_dict, indent=2)
         
     except Exception as e:
         logger.error(f"Training failed: {e}")

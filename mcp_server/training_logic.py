@@ -25,6 +25,7 @@ if __name__ == "__main__":
     # --- 2. Shared Arguments ---
     parser.add_argument("--ticker", type=str, required=True, help="Target stock ticker (e.g. NVDA)")
     parser.add_argument("--training_end_date", type=str, default="2024-12-31", help="Hard cutoff date for train/test split")
+    parser.add_argument("--custom_params", type=str, default=None, help="JSON string of hyperparameters")
 
     # --- 3. Analysis Specific Arguments ---
     parser.add_argument("--basket", type=str, default=None, help="Comma-separated basket tickers")
@@ -58,11 +59,20 @@ if __name__ == "__main__":
             bucket = args.bucket or os.getenv("GCS_MODEL_BUCKET")
             if not bucket:
                 raise ValueError("Bucket name is required for training (env var GCS_MODEL_BUCKET or --bucket arg)")
-
+            # Parse the JSON string back into a dictionary
+            parsed_params = None
+            if args.custom_params:
+                try:
+                    parsed_params = json.loads(args.custom_params)
+                    logging.info(f"Loaded custom parameters for training: {parsed_params}")
+                except json.JSONDecodeError as e:
+                    logging.error(f"Failed to parse custom_params JSON: {e}")
+                    
             result = train_basket_model_core(
                 target_ticker=args.ticker,
                 save_bucket=bucket,
-                training_end_date=args.training_end_date
+                training_end_date=args.training_end_date,
+                custom_params=parsed_params
             )
             print(result)
 
