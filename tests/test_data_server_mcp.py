@@ -23,7 +23,7 @@ from google import genai
 from google.adk.agents import LlmAgent
 from google.adk.models.google_llm import Gemini
 from google.adk.tools.mcp_tool.mcp_session_manager import SseConnectionParams
-from google.adk.tools import google_search, AgentTool
+from google.adk.tools import AgentTool
 from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
 from google.genai import types
 
@@ -34,16 +34,16 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from ag_ui_adk import ADKAgent, add_adk_fastapi_endpoint
 
-#logging.basicConfig(
-#    level=logging.DEBUG,
-#    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-#    handlers=[logging.StreamHandler(sys.stdout)]
-#)
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
 
 # Specifically boost the noise for the MCP and ADK libraries
-#logging.getLogger("google.adk").setLevel(logging.DEBUG)
-#logging.getLogger("mcp").setLevel(logging.DEBUG)
-#logging.getLogger("httpcore").setLevel(logging.DEBUG) # Shows raw network requests
+logging.getLogger("google.adk").setLevel(logging.DEBUG)
+logging.getLogger("mcp").setLevel(logging.DEBUG)
+logging.getLogger("httpcore").setLevel(logging.DEBUG) # Shows raw network requests
  
 # --- Path & Env Setup ---
 current_test_dir = Path(__file__).resolve().parent
@@ -65,7 +65,7 @@ if not PROJECT_ID:
 
 os.environ["GOOGLE_CLOUD_PROJECT"] = PROJECT_ID
 os.environ["GOOGLE_CLOUD_LOCATION"] = LOCATION
-os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "true"
+#os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "true"
 
 # Avoid rate limits and temorary service unavailability 
 retry_config = types.HttpRetryOptions(
@@ -95,9 +95,7 @@ toolset = McpToolset(
 # 3. Initialize Client in VERTEX AI Mode
 # setting vertexai=True tells the SDK to use your GCP Project Quota & Auth
 client = genai.Client(
-    vertexai=True,
-    project=PROJECT_ID,
-    location=LOCATION
+    api_key=os.getenv("GEMINI_API_KEY")
 )
 
 print(f"✅ Client initialized for Vertex AI Project: {PROJECT_ID}")
@@ -187,6 +185,21 @@ backtest_agent = LlmAgent(
     tools=[toolset] 
 )
 
+research_instruction = """
+Role: Macroeconomic and News Researcher.
+Tools Provided: search_financial_news, update_macro_data.
+Objective: Execute searches for the Lead Quant, synthesize the returned articles and data into a concise summary, and return that summary.
+"""
+
+research_agent = LlmAgent(
+    model=model,
+    name="research_agent",
+    instruction=research_instruction,
+    tools=[toolset] 
+)
+
+research_tool = AgentTool(agent=research_agent)
+
 ml_tool = AgentTool(agent=ml_agent)
 backtest_tool = AgentTool(agent=backtest_agent)
 
@@ -197,7 +210,7 @@ quant_agent = LlmAgent(
     tools=[
         ml_tool,
         backtest_tool,
-        google_search
+        research_tool
     ]
 )
 
