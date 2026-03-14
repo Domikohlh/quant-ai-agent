@@ -22,10 +22,11 @@ copy._deepcopy_dispatch[type(threading.Lock())] = lambda x, memo: x
 from google import genai
 from google.adk.agents import LlmAgent
 from google.adk.models.google_llm import Gemini
-from google.adk.tools.mcp_tool.mcp_session_manager import SseConnectionParams
+from google.adk.tools.mcp_tool.mcp_session_manager import SseConnectionParams, StdioConnectionParams
 from google.adk.tools import AgentTool
 from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
 from google.genai import types
+from mcp import StdioServerParameters 
 
 # 2. Frontend & API
 from fastapi import FastAPI, Request
@@ -86,6 +87,21 @@ headers={
 timeout=600
 )
 
+alpaca_env = os.environ.copy()
+alpaca_env.update({
+    "ALPACA_API_KEY": os.getenv("ALPACA_API_KEY"),
+    "ALPACA_SECRET_KEY": os.getenv("ALPACA_SECRET_KEY")
+})
+
+alpaca_ser = StdioServerParameters(
+    command="uvx",
+    args=["alpaca-mcp-server", "serve"],
+    env=alpaca_env
+    )
+
+alpaca_con = StdioConnectionParams(server_params=alpaca_ser, timeout=300)
+alpaca_tool = McpToolset(connection_params=alpaca_con)
+
 # 2. Initialize Toolset
 # This connects to the remote server via SSE instead of spawning a local process
 ml_toolset = McpToolset(
@@ -116,7 +132,8 @@ client = genai.Client(
 
 print(f"✅ Client initialized for Vertex AI Project: {PROJECT_ID}")
 
-model_id = "gemini-3-flash-preview" 
+fast_model_id = "gemini-3-flash-preview" 
+deep_model_id = "gemini-3.1-pro-preview"
 
 
 ml_instruction ="""
@@ -156,7 +173,7 @@ Execution Protocol:
 """
 quant_instruction = """
 Role: To interpret the user's request, dispatch the sub-agents, gather macroeconomic context, and make the final "Deploy or Reject" decision.
-Tools Provided: Sub-agent delegation tools (depending on your framework), search_financial_news, update_macro_data.
+Tools Provided: Sub-agent delegation tools (depending on your framework), search_financial_news, update_macro_data and an alpaca tool to monitor account portfolio.
 
 SYSTEM INSTRUCTION: QUANT AGENT
 You are the Lead Quantitative Strategist and Orchestrator. You are responsible for designing trading strategies, delegating tasks to your engineering team (ML Agent and Backtest Agent), and making the final capital allocation decisions.
@@ -183,25 +200,41 @@ Execution Protocol:
 
 10. Always provide a response to the user with the final decision, and the reason why you made the decision.
 
+11. Always monitor the trading account (e.g. Alpaca) portfolio health status. Use the account information to help you justifying the strategy and answer user query.
+
 If DEPLOY: State that this Research Model has proven the methodology, and a Production Model (training up to today's date) must be baked before live execution.
 """
 
 # 4. Run Generation with Tools
 # The 'async with' block ensures the MCP server subprocess is managed correctly
-model = Gemini(model=model_id, client=client, retry_options=retry_config)
+fast_model = Gemini(model=fast_model_id, client=client, retry_options=retry_config)
+deep_model = Gemini(model=deep_model_id, client=client, retry_options=retry_config)
+
+# Agent configuration
+strict_config = types.GenerateContentConfig(
+    temperature=0.0,
+    top_p=0.8
+)
+
+research_config = types.GenerateContentConfig(
+    temperature=0.4,
+    top_p=0.9
+)
 
 ml_agent = LlmAgent(
-    model=model,
+    model=deep_model,
     name="ml_agent",
     instruction=ml_instruction,
-    tools=[ml_toolset] 
+    tools=[ml_toolset],
+    generate_content_config=strict_config
 )
 
 backtest_agent = LlmAgent(
-    model=model,
+    model=fast_model,
     name="backtest_agent",
     instruction=backtest_instruction,
-    tools=[backtest_toolset] 
+    tools=[backtest_toolset],
+    generate_content_config=strict_config 
 )
 
 research_instruction = """
@@ -212,10 +245,11 @@ CRITICAL COMPRESSION RULE: You must NEVER return raw articles or raw FRED data. 
 """
 
 research_agent = LlmAgent(
-    model=model,
+    model=fast_model,
     name="research_agent",
     instruction=research_instruction,
-    tools=[research_toolset] 
+    tools=[research_toolset],
+    generate_content_config=research_config 
 )
 
 research_tool = AgentTool(agent=research_agent)
@@ -224,14 +258,16 @@ ml_tool = AgentTool(agent=ml_agent)
 backtest_tool = AgentTool(agent=backtest_agent)
 
 quant_agent = LlmAgent(
-    model=model,
+    model=deep_model,
     name="quant_agent",
     instruction=quant_instruction,
     tools=[
         ml_tool,
         backtest_tool,
-        research_tool
-    ]
+        research_tool,
+        alpaca_tool
+    ],
+    generate_content_config=research_config 
 )
 
 ag_ui_agent = ADKAgent(
