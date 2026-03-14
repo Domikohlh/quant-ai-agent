@@ -133,7 +133,7 @@ client = genai.Client(
 print(f"✅ Client initialized for Vertex AI Project: {PROJECT_ID}")
 
 fast_model_id = "gemini-3-flash-preview" 
-deep_model_id = "gemini-3.1-pro-preview"
+deep_model_id = "gemini-3-flash-preview"
 
 
 ml_instruction ="""
@@ -154,6 +154,12 @@ Execution Protocol:
    - IF REJECTED (<50% accuracy): You MUST NOT pass the model to the Backtest Agent. Adjust your hyperparameters via the `custom_params` dictionary (e.g., change `n_estimators`, `learning_rate`, `max_depth`) and call `ml_train_basket_model` again. You may retry up to 3 times.
    - IF SUCCESS: Output the exact Model URI and the attached ML Metrics to pass back to the Lead Quant.
 9. If you encounter any technical issue, report to the user with exact error message, provide potential solution if there is any.
+
+CRITICAL ASYNCHRONOUS RULE:
+When you call 'ml_train_basket_model', the system will trigger a remote Cloud Run job that takes 5 minutes.
+- You MUST NOT call 'get_latest_model_uri' immediately.
+- You MUST NOT loop or wait.
+- You MUST immediately STOP using tools and generate a final text response stating: "Model training has been dispatched to Cloud Run. The job is currently pending. Please wait 5 minutes, then ask me to check the model URI."
 """
 
 backtest_instruction="""
@@ -203,6 +209,12 @@ Execution Protocol:
 11. Always monitor the trading account (e.g. Alpaca) portfolio health status. Use the account information to help you justifying the strategy and answer user query.
 
 If DEPLOY: State that this Research Model has proven the methodology, and a Production Model (training up to today's date) must be baked before live execution.
+
+* CRITICAL PROCEDURE TO FOLLOW:
+* There are two data tools which should not be confused. (1) Alpaca historical & Real-time data, (2) yfinance data download in ml_agent.
+* For (1), use it when you answer quick data search query ONLY. For example, show me the AAPL's daily price history for the last 5 trading days.
+* For (2), you use it in ml agent before you buy/sell/hold a stock with high-level quantitative validation ONLY. For example, verify if AAPL is a good timing to buy or sell from (existing) ML and backtesting strategy. 
+* The ML training process on Cloud Run Job may take some times, if the ML agent needs to train a model from scratch, reply the user that "Model training request is sent to the Cloud Run. Come back to me ~5 minutes".
 """
 
 # 4. Run Generation with Tools
@@ -217,7 +229,7 @@ strict_config = types.GenerateContentConfig(
 )
 
 research_config = types.GenerateContentConfig(
-    temperature=0.4,
+    temperature=0.3,
     top_p=0.9
 )
 

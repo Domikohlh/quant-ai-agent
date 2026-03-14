@@ -7,6 +7,7 @@ from typing import Optional
 import json
 import requests
 from datetime import timedelta, datetime
+import time
 import numpy as np
 import joblib
 import io
@@ -27,6 +28,9 @@ from google.cloud.exceptions import NotFound
 current_dir = Path(__file__).resolve().parent
 project_root = current_dir.parent
 sys.path.append(str(project_root))
+
+active_training_jobs = {}
+active_feature_jobs ={}
 
 from core.database import DatabaseManager
 from helpers.data_helper import get_fred, sanitize_ticker, validate_stock_params, json_serial
@@ -101,7 +105,7 @@ def check_existing_dataset(
     ticker: str, 
     basket_name: str = "default", 
     training_end_date: str = "2024-12-31"
-) -> str:
+) -> dict:
     """
     Checks BigQuery to see if data exists for this asset and strategy.
     Returns the exact status of BOTH raw data and engineered training data.
@@ -139,14 +143,13 @@ def check_existing_dataset(
 
         # Return explicit instructions to the Agent
         if train_exists:
-            return "✅ FOUND: Engineered training data exists. SKIP `update_stock_data` and SKIP `ml_feature_analysis`. Proceed directly to Phase 2 (Model Training)."
+            return {"result": "✅ FOUND: Engineered training data exists. SKIP `update_stock_data` and SKIP `ml_feature_analysis`. Proceed directly to Phase 2 (Model Training)."}
         elif raw_exists and not train_exists:
-            return "⚠️ PARTIAL: Raw data exists, but training data is missing. SKIP `update_stock_data`, but you MUST run `ml_feature_analysis`."
+            return {"result": "⚠️ PARTIAL: Raw data exists, but training data is missing. SKIP `update_stock_data`, but you MUST run `ml_feature_analysis`."}
         else:
-            return "❌ NOT FOUND: No data exists. You MUST run `update_stock_data` first, then run `ml_feature_analysis`."
-
+            return {"result": "❌ NOT FOUND: No data exists. You MUST run `update_stock_data` first, then run `ml_feature_analysis`."}
     except Exception as e:
-        return f"Error checking database: {str(e)}"
+        return {"result": f"Error checking database: {str(e)}"}
 
 @mcp.tool()
 def update_stock_data(ticker: str, period: str = "5y", interval: str = "1h") -> str:
@@ -310,7 +313,7 @@ def update_stock_data(ticker: str, period: str = "5y", interval: str = "1h") -> 
 
         # 7. Construct Response
         if final_df is None or final_df.empty:
-             return json.dumps({"status": "error", "message": "Data processed but could not be retrieved."})
+             return {"result": "❌ Error: Data processed but could not be retrieved."}
 
         # Ensure sorted
         if bq_date_col in final_df.columns:
@@ -324,18 +327,17 @@ def update_stock_data(ticker: str, period: str = "5y", interval: str = "1h") -> 
             "ticker": safe_ticker,
             "rows_added": rows_added,
             "latest_data_date": latest_date_str,
-            "columns": final_df.columns.tolist(),
-            "sample_data": json.loads(final_df.tail(5).to_json(orient="records", date_format="iso"))
+            "instruction": "DATA SAVED. DO NOT CALL THIS TOOL AGAIN. Proceed immediately to ml_feature_analysis."
         }
 
-        return json.dumps(response_data, indent=2)
+        return response_data
 
     except Exception as e:
         logger.error(f"Error updating stock data: {e}")
-        return json.dumps({"status": "error", "message": str(e)})
+        return {"result": f"❌ Error: {str(e)}"}
 
 @mcp.tool()
-def update_macro_data(series_id: str = "GDP") -> str:
+def update_macro_data(series_id: str = "GDP") -> dict: # <--- Changed to dict
     """
     Fetches macroeconomic data from FRED (Federal Reserve Economic Data) and stores it in BigQuery.
     Useful for getting context on interest rates, inflation, or GDP.
@@ -354,7 +356,8 @@ def update_macro_data(series_id: str = "GDP") -> str:
         series = fred.get_series(series_id)
         df = series.to_frame(name="value")
         if df.empty:
-            return f"Error: No FRED data found for {series_id}."
+            return {"result": f"❌ Error: No FRED data found for {series_id}."}
+            
         df.reset_index(inplace=True)
         df.rename(columns={"index": "timestamp"}, inplace=True)
         
@@ -363,18 +366,16 @@ def update_macro_data(series_id: str = "GDP") -> str:
         df["source"] = "FRED"
         
         # 3. Store
-        # We might need a generic saver or reuse market_data with flexible schema
-        # For now, let's assume we save to a specific macro table
         table_id = os.getenv("BQ_MACRO_TABLE_ID", "market_data.macro_indicators")
         _get_db().save_market_data(df, table_id=table_id)
         
         latest_val = df.iloc[-1]['value']
         latest_date = df.iloc[-1]['timestamp'].strftime('%Y-%m-%d')
         
-        return f"✅ Updated {series_id}. Latest value: {latest_val} ({latest_date}). Stored in BigQuery table: {table_id}"
+        return {"result": f"✅ Updated {series_id}. Latest value: {latest_val} ({latest_date}). Stored in BigQuery table: {table_id}"}
         
     except Exception as e:
-        return f"❌ Error fetching FRED data: {e}"
+        return {"result": f"❌ Error fetching FRED data: {e}"}
 
 @mcp.tool()
 def search_financial_news(query: str, count: int = 5) -> str:
@@ -439,7 +440,7 @@ def search_financial_news(query: str, count: int = 5) -> str:
         web_results = data.get("web", {}).get("results", [])
         
         if not web_results:
-            return f"No results found for '{query}' on trusted financial sites."
+            return {"result": f"No results found for '{query}' on trusted financial sites."}
 
         formatted_results = []
         for i, item in enumerate(web_results, 1):
@@ -465,7 +466,7 @@ def search_financial_news(query: str, count: int = 5) -> str:
 
 #====================================================================================
 @mcp.tool()
-def get_latest_model_uri(ticker: str) -> str:
+def get_latest_model_uri(ticker: str) -> dict: # <--- Changed to dict
     """
     Retrieves the GCS URI of the most recently trained model for a specific ticker.
     This tool performs a fuzzy search in the 'models/' folder for any file containing the ticker.
@@ -492,15 +493,15 @@ def get_latest_model_uri(ticker: str) -> str:
                 # Clear the document so we don't accidentally read it on the next loop
                 doc_ref.delete() 
                 
-                return (
+                return {"result": (
                     f"❌ QA THRESHOLD FAILED: The recent training job completed, but accuracy was <= 50%. "
                     f"The model was NOT saved to GCS.\n\n"
                     f"--- FAILED METRICS ---\n{json.dumps(receipt, indent=2)}\n\n"
                     f"INSTRUCTION: DO NOT proceed to the Backtest Agent. You must adjust your hyperparameters "
                     f"(e.g., change n_estimators, learning_rate, or max_depth) and call `ml_train_basket_model` again."
-                )
+                )}
 
-        # --- 2. Check GCS for Success (Existing Logic) ---
+        # --- 2. Check GCS for Success ---
         project_id = os.getenv("GCP_PROJECT_ID")
         bucket_name = os.getenv("GCS_MODEL_BUCKET", f"{project_id}-models")
         bucket = db.storage_client.bucket(bucket_name)
@@ -509,7 +510,7 @@ def get_latest_model_uri(ticker: str) -> str:
         matching_blobs = [b for b in blobs if ticker in b.name and b.name.endswith(".joblib")]
         
         if not matching_blobs:
-            return f"⏳ STILL TRAINING: No models found for {ticker} yet. Wait 60 seconds and try again."
+            return {"result": f"⏳ STILL TRAINING: No models found for {ticker} yet. Wait 60 seconds and try again."}
 
         # Sort by time (Newest First)
         matching_blobs.sort(key=lambda x: x.time_created, reverse=True)
@@ -519,20 +520,20 @@ def get_latest_model_uri(ticker: str) -> str:
         blob_age_minutes = (now_utc - latest_blob.time_created).total_seconds() / 60
         
         if blob_age_minutes > 15:
-            return f"⏳ STILL TRAINING: The newest model found is {int(blob_age_minutes)} minutes old. Wait 60 seconds."
+            return {"result": f"⏳ STILL TRAINING: The newest model found is {int(blob_age_minutes)} minutes old. Wait 60 seconds."}
 
         latest_blob.reload() 
         metrics_text = json.dumps(latest_blob.metadata, indent=2) if latest_blob.metadata else "No metrics found."
         uri = f"gs://{bucket_name}/{latest_blob.name}"
         
-        return (
+        return {"result": (
             f"✅ FOUND LATEST MODEL: {uri}\n\n"
             f"--- TRUE ML METRICS ---\n{metrics_text}\n\n"
             f"INSTRUCTION: Model passed QA and retrieval was successful. Proceed immediately to Backtest Agent."
-        )
+        )}
             
     except Exception as e:
-        return f"Error: {str(e)}"
+        return {"result": f"❌ Error: {str(e)}"}
 
 @mcp.tool()
 def ml_feature_analysis(
@@ -544,7 +545,7 @@ def ml_feature_analysis(
     top_n: int = 15,
     training_end_date: str="2024-12-31",
     run_remote: bool = True
-) -> str:
+) -> dict:
     """
     [STEP 1 of Pipeline] 
     Performs 'Triple Barrier' labeling and feature engineering on a basket of stocks.
@@ -560,6 +561,17 @@ def ml_feature_analysis(
         training_end_date: The cutoff date. Data BEFORE this is for Training. Data AFTER is for Testing.
         run_remote: Always set to True to run on Cloud Run Jobs.
     """
+    global active_feature_jobs 
+    current_time = time.time()
+    job_key = f'{ticker}_feature'
+
+    # 1. EMERGENCY IDEMPOTENCY LOCK
+    if job_key in active_feature_jobs:
+        time_elapsed = current_time - active_feature_jobs[job_key]
+        if time_elapsed < 600:
+            return {"result": f"⚠️ REJECTED: Feature Analysis for {ticker} is currently running. DO NOT call this tool again. Stop and notify the user to wait."}
+            
+    active_feature_jobs[job_key] = current_time
 
     if not run_remote:
         try:
@@ -568,9 +580,11 @@ def ml_feature_analysis(
                 ticker, basket, barrier_width, time_horizon, 
                 correlation_threshold, top_n, training_end_date  # <--- Pass it here
             )
-            return json.dumps(result, default=json_serial, indent=2)
+            safe_result = {k: v for k, v in result.items() if k not in ['raw_data', 'dataframe']}
+            return {"result": f"✅ Local analysis complete: {safe_result}"}
+
         except Exception as e:
-            return json.dumps({"status": "error", "message": str(e)})
+            return {"result": f"❌ Error: {str(e)}"}
 
     try:
         from google.cloud import run_v2
@@ -601,18 +615,20 @@ def ml_feature_analysis(
             }
         )
         operation = client.run_job(request=request)
-        return f"🚀 Feature Analysis Job triggered for {ticker} (Basket: {basket or 'Single'})."
+        return {"result": f"🚀 SUCCESS: Feature Analysis Job triggered for {ticker}. STOP using tools and tell the user to wait 5 minutes."}
 
     except Exception as e:
-        return f"Error triggering Cloud Job: {e}"
+        if job_key in active_feature_jobs:
+            del active_feature_jobs[job_key]
+        return {"result": f"❌ Error triggering Cloud Job: {e}"}
 
 @mcp.tool()
 def ml_train_basket_model(
     target_ticker: str,
-     run_remote: bool = True, 
-     training_end_date: str="2024-12-31",
-     custom_params: dict=None
-     ) -> str:
+    run_remote: bool = True, 
+    training_end_date: str = "2024-12-31",
+    custom_params: dict = None
+) -> dict: # <--- CHANGED to dict to prevent nested FastMCP payloads
     """
     [STEP 2 of Pipeline]
     Trains an XGBoost classifier using the datasets created by 'ml_feature_analysis'.
@@ -628,26 +644,44 @@ def ml_train_basket_model(
         target_ticker: The stock ticker to train the model for.
         run_remote: Always set to True to run on Cloud Run Jobs.
         training_end_date: The chronological split date.
-        custom_params: A dictionary of XGBoost hyperparameters to override the defaults. {'n_estimators': 200, 'learning_rate': 0.05, 'max_depth': 5, 'objective': 'binary:logistic', 'eval_metric': 'logloss'}
+        custom_params: A dictionary of XGBoost hyperparameters to override the defaults. 
     """
+    global active_training_jobs
+    current_time = time.time()
+
+    # 1. EMERGENCY IDEMPOTENCY LOCK
+    if target_ticker in active_training_jobs:
+        time_elapsed = current_time - active_training_jobs[target_ticker]
+        if time_elapsed < 600: # 10 minute cooldown
+            return {
+                "result": f"⚠️ REJECTED: A training job for {target_ticker} was already started {int(time_elapsed)} seconds ago and is currently running. DO NOT call this tool again. Stop and notify the orchestrator."
+            }
+            
+    # Lock the ticker
+    active_training_jobs[target_ticker] = current_time
+
+    # 2. Setup GCP Variables
     project_id = os.getenv("GCP_PROJECT_ID")
     region = os.getenv("GCP_COMPUTE_REGION", "us-central1")
     bucket_name = os.getenv("GCS_MODEL_BUCKET", f"{project_id}-models")
-    job_name = "quant-training-job" # Name of your Cloud Run Job
+    job_name = "quant-training-job"
 
+    # 3. Local Execution (Bypasses Cloud Run)
     if not run_remote:
-        # Pass the new date parameter to the core function
-        result = train_basket_model_core(target_ticker, bucket_name, training_end_date)
-        return json.dumps(result, indent=2)
+        try:
+            result = train_basket_model_core(target_ticker, bucket_name, training_end_date)
+            # Ensure it returns a flat dict
+            return {"result": f"✅ Local training complete. Details: {json.dumps(result)}"}
+        except Exception as e:
+            return {"result": f"❌ Error during local training: {str(e)}"}
 
+    # 4. Remote Execution (Cloud Run)
     try:
-
         endpoint = f"{region}-run.googleapis.com"
         client = run_v2.JobsClient(
             client_options=client_options.ClientOptions(api_endpoint=endpoint)
         )
         
-        # Base arguments
         args = [
             "python", "mcp_server/training_logic.py", 
             "--task", "train",
@@ -656,7 +690,6 @@ def ml_train_basket_model(
             "--training_end_date", training_end_date
         ]
         
-        # Safely pass the dictionary as a JSON string to the CLI
         if custom_params:
             args.extend(["--custom_params", json.dumps(custom_params)])
 
@@ -671,13 +704,18 @@ def ml_train_basket_model(
         operation = client.run_job(request=request)
         
         param_msg = f" using params: {custom_params}" if custom_params else " using default params."
-        return f"🚀 Training Job triggered for {target_ticker}{param_msg} Saving to {bucket_name}. (Async execution started)"
+        
+        # CHANGED: Return dict instead of string
+        return {
+            "result": f"✅ SUCCESS: Training Job triggered for {target_ticker}{param_msg} Saving to {bucket_name}. STOP using tools and tell the user to wait 5 minutes."
+        }
 
     except Exception as e:
-        return f"Error triggering Cloud Run Job: {e}"
-
-    except Exception as e:
-        return f"Error triggering Cloud Run Job: {e}"
+        # CHANGED: Clear the lock if the API call actually failed so the agent can retry later
+        if target_ticker in active_training_jobs:
+            del active_training_jobs[target_ticker]
+            
+        return {"result": f"❌ Error triggering Cloud Run Job: {str(e)}"}
 
 
 #====================================================================================
@@ -691,7 +729,7 @@ def backtest_model_strategy(
     model_uri: str,
     start_date: str = "2025-01-01",
     end_date: str = "2025-12-31"
-) -> str:
+) -> dict:
     """
     Validates a trained model by running a vectorized backtest on historical data.
     Uses 'Triple Barrier' physics (Stop Loss 3%, Take Profit 5%, Time Limit 5 days).
@@ -702,8 +740,21 @@ def backtest_model_strategy(
         start_date: YYYY-MM-DD
         end_date: YYYY-MM-DD
     """
-    result = run_backtest_core(ticker, model_uri, start_date, end_date)
-    return json.dumps(result, indent=2)
+    try:
+        result = run_backtest_core(ticker, model_uri, start_date, end_date)
+        
+        # 1. TOKEN PROTECTION: Strip out massive arrays (time series, trade logs)
+        safe_result = {}
+        if isinstance(result, dict):
+            # Only keep top-level stats, drop big lists
+            safe_result = {k: v for k, v in result.items() if not isinstance(v, (list, pd.Series, np.ndarray))}
+        else:
+            safe_result = {"summary": str(result)[:500]} # Fallback truncation
+
+        return {"result": safe_result}
+        
+    except Exception as e:
+        return {"result": f"❌ Error during backtest: {str(e)}"}
 
 # --- 4. Running the Server ---
 if __name__ == "__main__":

@@ -27,17 +27,20 @@ The Quant AI Agent is a decoupled, multi-agent microservice architecture designe
 - Core Tools Operational: The FastMCP server successfully executes complex financial pipelines, including check_existing_dataset, update_stock_data, and get_latest_model_uri.
 - Asynchronous Compute: Heavy machine learning tasks (ml_feature_analysis and ml_train_basket_model) have been offloaded to separate GCP Cloud Run Jobs to prevent API gateway timeouts during model training.
 - Backend Loop Integrity: By hiding raw tools inside sub-agents, the system successfully bypasses single-turn UI framework limitations (CopilotKit) and allows agents to loop autonomously on the backend.
+- Agent is able to look at the Alpaca account.
 
 # 🛠️ Recent Improvements
 
 - Cost Optimization: Migrated API routing from the paid Vertex AI enterprise SDK to Google AI Studio's Pay-As-You-Go tier, significantly reducing infrastructure and search grounding overhead.
 - Schema Flattening: Updated MCP return types to output flat dictionaries instead of strings, bypassing FastMCP's redundant JSON wrapping (x-fastmcp-wrap-result) and curing LLM infinite tool-call loops.
-- Tools are filtered by 'tool_filter' to avoid hallucination.
+- Tools are filtered by 'tool_filter' to avoid tool hallucination.
 
 # 🚧 Current Bottlenecks & Directions
 
 - The LLM continuously reruns the ML module on CloudRun service 
 - Need to ask the research agent to provide more information instead of only 3 bullet points
-- Official MCP Server: Alpaca
-- Increase the complexity of the robustness of backtesting strategy
+- Increase the complexity and robustness of backtesting strategy
+- Session implementation
+- Web re-design
+- Frontend showing the training processes
 
