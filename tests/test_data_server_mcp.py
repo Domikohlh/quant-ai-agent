@@ -88,10 +88,26 @@ timeout=600
 
 # 2. Initialize Toolset
 # This connects to the remote server via SSE instead of spawning a local process
-toolset = McpToolset(
-    connection_params=connection_params
+ml_toolset = McpToolset(
+    connection_params=connection_params,
+    tool_filter=[
+        "check_existing_dataset", 
+        "update_stock_data", 
+        "ml_feature_analysis", 
+        "ml_train_basket_model", 
+        "get_latest_model_uri"
+    ]
 )
 
+backtest_toolset = McpToolset(
+    connection_params=connection_params,
+    tool_filter=["backtest_model_strategy"]
+)
+
+research_toolset = McpToolset(
+    connection_params=connection_params,
+    tool_filter=["search_financial_news", "update_macro_data"]
+)
 # 3. Initialize Client in VERTEX AI Mode
 # setting vertexai=True tells the SDK to use your GCP Project Quota & Auth
 client = genai.Client(
@@ -105,7 +121,6 @@ model_id = "gemini-3-flash-preview"
 
 ml_instruction ="""
 Role: To generate clean data, engineer features, and train the predictive model.
-Tools Provided: check_existing_dataset, update_stock_data, ml_feature_analysis, ml_train_basket_model, get_latest_model_uri.
 
 SYSTEM INSTRUCTION: ML AGENT
 You are the Lead Machine Learning Engineer for a quantitative trading desk. Your sole objective is to build and retrieve robust, noise-free predictive models for the target asset requested by the Lead Quant.
@@ -164,6 +179,10 @@ Execution Protocol:
 
 8. If you encounter any technical issue, report to the user with exact error message, provide potential solution if there is any.
 
+9. You can dynamically use 0-3 sub-agents to gather context and make a decision. For example, user may ask a simple request that does not require the full pipeline, in that case, you can use your own knowledge or 1-3 sub-agents  to gather context and make a decision.
+
+10. Always provide a response to the user with the final decision, and the reason why you made the decision.
+
 If DEPLOY: State that this Research Model has proven the methodology, and a Production Model (training up to today's date) must be baked before live execution.
 """
 
@@ -175,27 +194,28 @@ ml_agent = LlmAgent(
     model=model,
     name="ml_agent",
     instruction=ml_instruction,
-    tools=[toolset] 
+    tools=[ml_toolset] 
 )
 
 backtest_agent = LlmAgent(
     model=model,
     name="backtest_agent",
     instruction=backtest_instruction,
-    tools=[toolset] 
+    tools=[backtest_toolset] 
 )
 
 research_instruction = """
 Role: Macroeconomic and News Researcher.
 Tools Provided: search_financial_news, update_macro_data.
-Objective: Execute searches for the Lead Quant, synthesize the returned articles and data into a concise summary, and return that summary.
+Objective: Execute searches for the Lead Quant. 
+CRITICAL COMPRESSION RULE: You must NEVER return raw articles or raw FRED data. You must synthesize all tool returns into a strict, 3-bullet-point summary of the core market drivers. Max 50 words.
 """
 
 research_agent = LlmAgent(
     model=model,
     name="research_agent",
     instruction=research_instruction,
-    tools=[toolset] 
+    tools=[research_toolset] 
 )
 
 research_tool = AgentTool(agent=research_agent)
