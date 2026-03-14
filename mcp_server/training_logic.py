@@ -4,6 +4,7 @@ import os
 import sys
 import logging
 from pathlib import Path
+import json
 
 # Add project root to sys.path so we can import helpers
 current_dir = Path(__file__).resolve().parent

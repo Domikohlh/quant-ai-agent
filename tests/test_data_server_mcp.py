@@ -1,4 +1,5 @@
 import os
+from re import T
 import sys
 import logging
 import json 
@@ -100,7 +101,40 @@ alpaca_ser = StdioServerParameters(
     )
 
 alpaca_con = StdioConnectionParams(server_params=alpaca_ser, timeout=300)
-alpaca_tool = McpToolset(connection_params=alpaca_con)
+alpaca_tool = McpToolset(
+    connection_params=alpaca_con,
+    tool_filter=[
+        "get_account_info",
+        "get_all_positions",
+        "get_open_position",
+        "get_orders",
+        "get_portfolio_history",          
+        
+        # --- Order Execution ---
+        "place_stock_order",
+        "cancel_order_by_id",
+        "close_position",
+        "close_all_positions",
+        "cancel_all_orders",
+        
+        # --- Watchlist Management (Brokerage Memory) ---
+        "get_watchlists",                 
+        "create_watchlist",              
+        "get_watchlist_by_id",  
+        "update_watchlist_by_id"          
+        "add_asset_to_watchlist_by_id",   
+        "remove_asset_from_watchlist_by_id",
+        "delete_watchlist_by_id"
+        
+        # --- Fundamental & Event Data ---
+        "get_corporate_actions",
+
+        # --- Market Calendar ---
+        "get_calendar",
+        "get_clock"
+
+    ]
+    )
 
 # 2. Initialize Toolset
 # This connects to the remote server via SSE instead of spawning a local process
@@ -126,6 +160,14 @@ research_toolset = McpToolset(
 )
 # 3. Initialize Client in VERTEX AI Mode
 # setting vertexai=True tells the SDK to use your GCP Project Quota & Auth
+#vertex ai
+#client = genai.Client(
+#    vertexai=True,
+#    project=PROJECT_ID,
+#    location=LOCATION
+#)
+
+#Google AI Studio
 client = genai.Client(
     api_key=os.getenv("GEMINI_API_KEY")
 )

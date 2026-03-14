@@ -168,7 +168,7 @@ def run_feature_analysis_core(
         final_df = combined_df[final_cols].copy().dropna()
         
         # Parse the cutoff date to 2024-12-31
-        cutoff_dt = pd.to_datetime(training_end_date).tz_localize(None)
+        cutoff_dt = pd.to_datetime(training_end_date).tz_localize('UTC')
         
         # 1. Test Set: STRICTLY AFTER Cutoff
         test_df = final_df[
