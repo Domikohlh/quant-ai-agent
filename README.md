@@ -4,6 +4,10 @@ An autonomous quantitative trading research system powered by Large Language Mod
 
 This system utilizes a multi-agent architecture to research, engineer, train, and validate algorithmic trading strategies using strict chronological out-of-sample testing and machine learning.
 
+## Roadmap 
+
+![System Architecture](assets/Overview.png)
+
 ## 🚀 Current Status
 * **Backend & ML Pipeline:** **Fully Operational.** The core infrastructure (BigQuery, Cloud Run, GCS, Firestore) and the asynchronous machine learning pipeline (Triple Barrier Labeling, XGBoost, Backtesting) are successfully deployed and functional.
 * **Frontend:** **Work in Progress (WIP).** A Next.js App Router web application built with Tailwind CSS and Shadcn UI. It is currently being integrated with **CopilotKit** for an AI sidebar and WebSockets for sub-second live market charting.

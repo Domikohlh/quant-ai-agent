@@ -41,9 +41,6 @@ The Quant AI Agent is a decoupled, multi-agent microservice architecture designe
 - The LLM continuously reruns the ML module on CloudRun service 
 - Need to ask the research agent to provide more information instead of only 3 bullet points.
 - Increase the complexity and robustness of backtesting strategy
-
-
-
 - Session implementation
 - Web re-design
 - Frontend showing the training processes
