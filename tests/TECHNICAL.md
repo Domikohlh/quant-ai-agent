@@ -45,3 +45,6 @@ The Quant AI Agent is a decoupled, multi-agent microservice architecture designe
 - Web re-design
 - Frontend showing the training processes
 
+# Emergent things to do
+
+- Take the data sanitiser/installation out of the ml_feature analysis core
