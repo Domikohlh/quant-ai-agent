@@ -1,0 +1,96 @@
+import yfinance as yf
+import pandas as pd
+import numpy as np
+
+def backtest_vcp_strategy(symbol, initial_capital=10000):
+    # 1. 获取数据
+    df = yf.download(symbol, period="2y", interval="1d", auto_adjust=True)
+    if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+
+    # 计算技术指标
+    df['MA10'] = df['Close'].rolling(window=10).mean()
+    df['MA20'] = df['Close'].rolling(window=20).mean()
+    df['MA50'] = df['Close'].rolling(window=50).mean()
+    
+    # 计算波动紧凑度 (VCP 特征)
+    df['High_20'] = df['High'].rolling(window=20).max()
+    df['Low_20'] = df['Low'].rolling(window=20).min()
+    df['Body_Size'] = (df['Close'] - df['Open']).abs()
+    
+    # 交易变量
+    capital = initial_capital
+    position = 0      # 持仓数量
+    entry_price = 0
+    stop_loss = 0
+    half_sold = False
+    entry_date_idx = 0
+    trades = []
+
+    for i in range(50, len(df)):
+        curr = df.iloc[i]
+        prev = df.iloc[i-1]
+        
+        # --- 离场逻辑 ---
+        if position > 0:
+            days_in_trade = i - entry_date_idx
+            
+            # 1. 初始止损触发
+            if curr['Low'] < stop_loss:
+                capital += position * stop_loss
+                trades.append({"exit": "Stop Loss", "price": stop_loss, "date": df.index[i]})
+                position = 0
+                continue
+            
+            # 2. 3个交易日后有盈利，减仓50%
+            if not half_sold and days_in_trade >= 3 and curr['Close'] > entry_price:
+                sell_qty = position // 2
+                capital += sell_qty * curr['Close']
+                position -= sell_qty
+                half_sold = True
+                trades.append({"exit": "Take Profit 50%", "price": curr['Close'], "date": df.index[i]})
+
+            # 3. 移动止盈 (收盘跌破MA10)
+            if curr['Close'] < curr['MA10']:
+                capital += position * curr['Close']
+                trades.append({"exit": "MA10 Exit", "price": curr['Close'], "date": df.index[i]})
+                position = 0
+                continue
+
+        # --- 进场逻辑 (VCP 突破) ---
+        else:
+            # 判断 VCP 形态 (简化版条件)
+            # 1. 在MA50之上，距离不远 (<35%)
+            dist_ma50 = (curr['Close'] - curr['MA50']) / curr['MA50']
+            
+            # 2. 紧凑排列: 过去5天最高/最低价振幅显著缩小
+            recent_range = (df['High'].iloc[i-5:i].max() - df['Low'].iloc[i-5:i].min()) / curr['Close']
+            is_tight = recent_range < 0.05 # 极度缩量紧凑
+            
+            # 3. 突破前高 (Pivot Point)
+            if curr['Close'] > df['High'].iloc[i-10:i].max() and is_tight and dist_ma50 < 0.35:
+                # 计算仓位控制 (Risk 1% of total capital)
+                entry_price = curr['Close']
+                stop_loss = curr['Low'] # 止损设在当天低点
+                
+                risk_per_share = entry_price - stop_loss
+                if risk_per_share > 0:
+                    max_risk_dollars = capital * 0.01
+                    position = int(max_risk_dollars // risk_per_share)
+                    
+                    # 检查账户资金是否足够，不能过度杠杆
+                    if position * entry_price > capital:
+                        position = int(capital // entry_price)
+                    
+                    if position > 0:
+                        capital -= position * entry_price
+                        entry_date_idx = i
+                        half_sold = False
+                        trades.append({"entry": "Buy", "price": entry_price, "date": df.index[i], "stop": stop_loss})
+
+    return capital, trades
+
+# 运行回测
+final_val, history = backtest_vcp_strategy("INTC")
+print(f"最终账户净值: ${final_val:.2f}")
+for t in history:
+    print(t)
