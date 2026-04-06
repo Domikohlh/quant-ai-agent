@@ -1,0 +1,62 @@
+import yfinance as yf
+import pandas as pd
+import numpy as np
+from sklearn.linear_model import LinearRegression
+
+def analyze_vcp_advanced(symbol):
+    df = yf.download(symbol, period="1y", interval="1d", auto_adjust=True)
+    if len(df) < 100: return None
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    df['MA10'] = df['Close'].rolling(window=10).mean()
+    df['MA20'] = df['Close'].rolling(window=20).mean()
+    df['MA50'] = df['Close'].rolling(window=50).mean()
+    
+    curr = df.iloc[-1]
+
+    # 1. linear run up from last 10 to 40 days
+    lookback_runup = df.iloc[-40:-10]
+    y = lookback_runup['Close'].values.reshape(-1, 1)
+    X = np.arange(len(y)).reshape(-1, 1)
+    reg = LinearRegression().fit(X, y)
+    r_squared = reg.score(X, y)
+
+    # 2. large reversion in last 30 days
+    body_size = (df['Close'] - df['Open']).abs()
+    avg_range = (df['High'] - df['Low']).rolling(20).mean()
+    large_red_candles = ( (df['Close'] < df['Open']) & (body_size > 1.5 * avg_range) ).iloc[-30:].sum()
+
+    # 3. supported by mas?
+    dist_ma10 = abs(curr['Close'] - curr['MA10']) / curr['MA10']
+    dist_ma20 = abs(curr['Close'] - curr['MA20']) / curr['MA20']
+    dist_ma50 = abs(curr['Close'] - curr['MA50']) / curr['MA50']
+    
+    on_support = (dist_ma10 < 0.02) or (dist_ma20 < 0.02) or (dist_ma50 < 0.03)
+
+    # 4. recent ATR is less than previous ATR (tightened)
+    recent_atr = (df['High'].iloc[-5:].max() - df['Low'].iloc[-5:].min()) / curr['Close']
+    prev_atr = (df['High'].iloc[-20:-5].max() - df['Low'].iloc[-20:-5].min()) / df['Close'].iloc[-20]
+    is_tight = recent_atr < 0.5 * prev_atr
+    # 5. close distance from MA50
+    dist_from_ma50 = (curr['Close'] - curr['MA50']) / curr['MA50']
+
+    results = {
+        "Symbol": symbol,
+        "Linear_R2": round(r_squared, 2),
+        "Red_Candles": int(large_red_candles),
+        "Is_Tight": is_tight,
+        "Dist_MA50_Pct": round(dist_from_ma50 * 100, 2),
+        "Score": 0
+    }
+
+    passed = True
+    if r_squared > 0.7: results["Score"] += 1
+    if large_red_candles <= 2: results["Score"] += 1
+    if is_tight: results["Score"] += 2
+    if dist_from_ma50 > 0.35: passed = False
+    if not on_support: results["Score"] -= 1
+
+    return results if passed else None
+
+print(analyze_vcp_advanced("AAPL"))
