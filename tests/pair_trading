@@ -1,0 +1,348 @@
+import asyncio
+import numpy as np
+import pandas as pd
+import vectorbt as vbt
+from itertools import product
+import matplotlib.pyplot as plt
+from scipy.stats import ttest_ind, mannwhitneyu, binomtest
+from scipy.stats import stats
+import matplotlib
+matplotlib.use('TkAgg')  # Use non-interactive backend
+
+def analyze_correlation_breaks_btc_vs_alts_test_split(
+    df_prices,
+    assets,
+    forward_windows,
+    correlation_windows,
+    rolling_z_windows,
+    break_magnitudes,
+    execution_cost=0.0006,
+    split_ratio=0.7,
+    debug_every_n=20,
+    min_samples=10
+):
+    results = []
+    debug_counter = 0
+    a1 = 'BTC'
+
+
+    for a2 in assets:
+        if a2 == a1:
+            continue
+
+        try:
+            raw_prices = df_prices[[a1, a2]].copy()
+            valid_start_idx = raw_prices[a2][(raw_prices[a2] > 0) & raw_prices[a2].notna()].first_valid_index()
+            if valid_start_idx is None:
+                continue
+
+            prices = raw_prices.loc[valid_start_idx:].dropna()
+            if len(prices) < 100:
+                continue
+
+            # Time-based split
+            split_index = int(len(prices) * split_ratio)
+            split_date = prices.index[split_index]
+            prices_train = prices.iloc[:split_index]
+            returns_train = prices_train.pct_change().dropna()
+
+            for fw, corr_win, z_win, mag in product(forward_windows, correlation_windows, rolling_z_windows, break_magnitudes):
+                debug_counter += 1
+
+                try:
+                    rolling_corr = returns_train[a1].rolling(corr_win).corr(returns_train[a2])
+                    corr_diff = rolling_corr.diff()
+
+                    # Check Normality
+                    Normality = None
+                    mean_corr = rolling_corr.mean()
+                    std_corr = rolling_corr.std()
+                    ks_stat, ks_p_value = stats.kstest(rolling_corr.dropna(), 'norm', args=(mean_corr, std_corr))
+                    if ks_p_value < 0.05:
+                        Normality = False
+                    else:
+                        Normality = True
+
+                    z_corr_diff = (corr_diff - corr_diff.rolling(z_win).mean()) / corr_diff.rolling(z_win).std()
+
+                    pos_breaks = z_corr_diff > mag
+                    neg_breaks = z_corr_diff < -mag
+
+                    pos_break_times = pos_breaks[pos_breaks].index
+                    neg_break_times = neg_breaks[neg_breaks].index
+
+                    forward_returns = returns_train.shift(-fw).rolling(fw).sum()
+                    future_diff = forward_returns[a1] - forward_returns[a2]
+
+                    post_pos = future_diff[future_diff.index.isin(pos_break_times)].dropna()
+                    post_neg = future_diff[future_diff.index.isin(neg_break_times)].dropna()
+                    non_break = future_diff[~(future_diff.index.isin(pos_break_times) | future_diff.index.isin(neg_break_times))].dropna()
+
+                    if len(post_pos) < min_samples or len(post_neg) < min_samples or len(non_break) < min_samples:
+                        continue
+
+                    # BTC outperformance
+                    _, p_pos_btc = mannwhitneyu(post_pos, non_break, alternative='greater')
+                    _, p_neg_btc = mannwhitneyu(post_neg, non_break, alternative='greater')
+
+                    # Alt outperformance
+                    _, p_pos_alt = mannwhitneyu(post_pos, non_break, alternative='less')
+                    _, p_neg_alt = mannwhitneyu(post_neg, non_break, alternative='less')
+
+                    results.append({
+                        "asset_1": a1,
+                        "asset_2": a2,
+                        "start_date": valid_start_idx,
+                        "split_date": split_date,
+                        "forward_window": fw,
+                        "correlation_window": corr_win,
+                        "zscore_window": z_win,
+                        "break_magnitude": mag,
+                        "num_pos_breaks": len(post_pos),
+                        "num_neg_breaks": len(post_neg),
+                        "pos_break_mean": post_pos.mean(),
+                        "neg_break_mean": post_neg.mean(),
+                        "adj_pos_mean": post_pos.mean() - execution_cost,
+                        "adj_neg_mean": post_neg.mean() - execution_cost,
+                        "non_break_mean": non_break.mean(),
+                        "p_value_pos_btc_vs_nonbreak": p_pos_btc,
+                        "p_value_neg_btc_vs_nonbreak": p_neg_btc,
+                        "p_value_pos_alt_vs_nonbreak": p_pos_alt,
+                        "p_value_neg_alt_vs_nonbreak": p_neg_alt,
+                        'corr_diff_normal': Normality
+                    })
+
+                    if debug_counter % debug_every_n == 0:
+                        print(f"{debug_counter} combinations processed...")
+
+                except Exception as inner_e:
+                    print(f"[ERROR] a1={a1}, a2={a2}, fw={fw}, corr={corr_win}, z={z_win}, mag={mag}: {inner_e}")
+                    continue
+
+        except Exception as outer_e:
+            print(f"[SKIP] Skipping pair {a1}-{a2} due to error: {outer_e}")
+            continue
+
+    return pd.DataFrame(results)
+
+
+def run_correlation_break_backtest_dual(
+    df_prices,
+    results_df,
+    execution_cost_bps=0.03,
+    p_value_thresh=0.05,
+    # Candidate take profit values and scaling factors to derive stop loss values.
+    tp_values=[0.02, 0.03, 0.04],
+    scale_values=[0.5, 0.75, 1]
+):
+    stats_dict = {}
+    print('Now working on run_correlation_break_backtest_dual')
+
+    # Convert necessary columns to numeric
+    for col in [
+        'p_value_pos_btc_vs_nonbreak', 'p_value_neg_btc_vs_nonbreak',
+        'p_value_pos_alt_vs_nonbreak', 'p_value_neg_alt_vs_nonbreak',
+        'adj_pos_mean', 'adj_neg_mean'
+    ]:
+        results_df[col] = pd.to_numeric(results_df[col], errors='coerce')
+
+    def build_backtest_signal(a1, a2, fw, corr_win, z_win, mag, break_type, direction,
+                              split_date, period, tp=None, sl=None):
+        """
+        period: 'train' or 'test'
+        tp, sl: take profit and stop loss levels as decimals (e.g. 0.02 for 2%)
+        """
+        prices = df_prices[[a1, a2]].dropna()
+        split_date_dt = pd.to_datetime(split_date)
+        if period == 'train':
+            prices = prices[prices.index < split_date_dt]
+        else:
+            prices = prices[prices.index >= split_date_dt]
+
+        if prices.empty or len(prices) < (corr_win + z_win + fw):
+            return None
+
+        # Compute returns and correlation signals
+        returns = prices.pct_change().dropna()
+        rolling_corr = returns[a1].rolling(corr_win).corr(returns[a2])
+        corr_diff = rolling_corr.diff()
+        z_corr_diff = (corr_diff - corr_diff.rolling(z_win).mean()) / corr_diff.rolling(z_win).std()
+
+        if break_type == "pos":
+            signal = z_corr_diff > mag
+        else:
+            signal = z_corr_diff < -mag
+
+        signal = signal.reindex(prices.index).fillna(False)
+        entries = signal.copy()
+        default_exits = entries.shift(fw).fillna(False)
+
+        # If a TP or SL is provided, simulate exit conditions based on TP and SL thresholds.
+        if tp is not None or sl is not None:
+            stops_exits = pd.Series(False, index=prices.index)
+            entry_times = entries[entries].index
+            for entry_time in entry_times:
+                # Determine the entry spread price (depending on trade direction)
+                if direction == 1:
+                    entry_price = prices.loc[entry_time, a1] / prices.loc[entry_time, a2]
+                else:
+                    entry_price = prices.loc[entry_time, a2] / prices.loc[entry_time, a1]
+
+                # Look ahead in the price series after the entry time
+                future_times = prices.index[prices.index > entry_time]
+                for t in future_times:
+                    if direction == 1:
+                        current_price = prices.loc[t, a1] / prices.loc[t, a2]
+                    else:
+                        current_price = prices.loc[t, a2] / prices.loc[t, a1]
+                    # Calculate return relative to entry
+                    ret = (current_price - entry_price) / entry_price
+                    if tp is not None and ret >= tp:
+                        stops_exits[t] = True
+                        break
+                    if sl is not None and ret <= -sl:
+                        stops_exits[t] = True
+                        break
+            exits = stops_exits | default_exits
+        else:
+            exits = default_exits
+
+        if direction == 1:
+            spread_price = prices[a1] / prices[a2]
+        else:
+            spread_price = prices[a2] / prices[a1]
+        spread_price = spread_price.replace([np.inf, -np.inf], np.nan).dropna()
+
+        spread_price, entries = spread_price.align(entries, join='inner')
+        _, exits = entries.align(exits, join='inner')
+
+        if spread_price.empty or entries.sum() == 0:
+            return None
+
+        pf = vbt.Portfolio.from_signals(
+            close=spread_price,
+            entries=entries,
+            exits=exits,
+            direction='longonly',
+            size=1.0,
+            fees=execution_cost_bps / 100,
+            freq='1h'
+        )
+        return pf
+
+    # Define the conditions for backtesting
+    conditions = [
+        ('pos', 1, 'p_value_pos_btc_vs_nonbreak'),
+        ('neg', 1, 'p_value_neg_btc_vs_nonbreak'),
+        ('pos', -1, 'p_value_pos_alt_vs_nonbreak'),
+        ('neg', -1, 'p_value_neg_alt_vs_nonbreak'),
+    ]
+
+    for _, row in results_df.iterrows():
+        a1 = row['asset_1']
+        a2 = row['asset_2']
+        fw = int(row['forward_window'])
+        corr_win = int(row['correlation_window'])
+        z_win = int(row['zscore_window'])
+        mag = float(row['break_magnitude'])
+        split_date = row.get('split_date')
+        Normality = row['corr_diff_normal']
+
+        for break_type, direction, p_col in conditions:
+            if pd.notnull(row[p_col]) and row[p_col] < p_value_thresh:
+                key = f"{a1}_vs_{a2}_{break_type}_{'btc' if direction==1 else 'alt'}_fw{fw}_z{z_win}_corr{corr_win}"
+                # --- Grid search over TP values and scale factors
+                best_training_pf = None
+                best_training_metric = -np.inf  # Using total return as the metric
+                best_tp = None
+                best_sl = None
+                best_training_stats = None
+
+                for tp in tp_values:
+                    for scale in scale_values:
+                        sl = scale * tp  # Compute stop loss from tp and scale
+                        train_pf = build_backtest_signal(a1, a2, fw, corr_win, z_win, mag,
+                                                         break_type, direction, split_date,
+                                                         period='train', tp=tp, sl=sl)
+                        if train_pf is None:
+                            continue
+                        train_stats = train_pf.trades.stats()
+                        train_total_return = train_pf.stats().get('Total Return [%]', -np.inf)
+                        if train_total_return > best_training_metric:
+                            best_training_metric = train_total_return
+                            best_training_pf = train_pf
+                            best_tp = tp
+                            best_sl = sl
+                            best_training_stats = train_stats
+
+                if best_training_pf is None:
+                    continue
+
+                # Test period backtest with the chosen TP/SL pair
+                test_pf = build_backtest_signal(a1, a2, fw, corr_win, z_win, mag,
+                                                break_type, direction, split_date,
+                                                period='test', tp=best_tp, sl=best_sl)
+                if test_pf is None:
+                    continue
+                test_stats = test_pf.trades.stats()
+
+                training_total_return = best_training_pf.stats().get('Total Return [%]', np.nan)
+                testing_total_return = test_pf.stats().get('Total Return [%]', np.nan)
+                training_win_rate = best_training_stats.get('Win Rate [%]', np.nan)
+                testing_win_rate = test_stats.get('Win Rate [%]', np.nan)
+
+                stats_dict[key] = {
+                    "direction": "long_btc" if direction == 1 else "long_alt",
+                    "corr_break_type": break_type,
+                    "training_total_return": training_total_return,
+                    "training_win_rate": training_win_rate,
+                    "training_num_trades": best_training_stats.get('Total Closed Trades', np.nan),
+                    "testing_total_return": testing_total_return,
+                    "testing_win_rate": testing_win_rate,
+                    "testing_num_trades": test_stats.get('Total Closed Trades', np.nan),
+                    "diff_total_return": testing_total_return - training_total_return,
+                    "diff_win_rate": testing_win_rate - training_win_rate,
+                    "chosen_tp": best_tp,
+                    "chosen_sl": best_sl,
+                    "train_pf": best_training_pf,  # Portfolio objects for further inspection
+                    "test_pf": test_pf,
+                    'corr_diff_normal':Normality
+                }
+    return stats_dict
+
+df_prices_cap = pd.read_csv('All_Coins_Close_Hourly.csv', index_col=0)
+
+df_prices_cap = df_prices_cap[['WIF', 'BTC']]
+print(df_prices_cap.head(30))
+
+df_prices_cap.index = pd.to_datetime(df_prices_cap.index)
+
+
+results_df = analyze_correlation_breaks_btc_vs_alts_test_split(
+    df_prices=df_prices_cap,
+    assets= df_prices_cap.columns,
+    forward_windows=[1, 2, 4, 6],
+    correlation_windows=[12, 24, 48],
+    rolling_z_windows=[10, 15, 20],
+    break_magnitudes=[1.5, 2.0, 2.5],
+    split_ratio=0.7
+)
+
+# results_df.to_csv('results.csv', index=False)
+# results_df = pd.read_csv('results.csv')
+
+stats_dict_dual = run_correlation_break_backtest_dual(
+    df_prices=df_prices_cap,
+    results_df=results_df,
+    execution_cost_bps=0.03,
+    p_value_thresh=0.05,
+    tp_values=[0.02, 0.03, 0.04],
+    scale_values=[0.5, 0.75, 1]
+)
+
+# Convert the resulting dictionary to a DataFrame for further inspection:
+df_stats_dual = pd.DataFrame.from_dict(stats_dict_dual, orient='index')
+df_stats_dual.reset_index(inplace=True)
+df_stats_dual.rename(columns={'index': 'strategy_key'}, inplace=True)
+print('Finally the df_stats_dual:')
+df_stats_dual.to_excel('correlation_stats_dual.xlsx', index=False)
