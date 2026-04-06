@@ -1,0 +1,743 @@
+#!/usr/bin/env python3
+"""
+Feature Transformer for BTC Analysis
+
+This script processes any feature data file with timestamp and raw value columns,
+and generates multiple transformed versions of the data.
+"""
+
+import os
+import sys
+import pandas as pd
+import numpy as np
+from typing import List, Dict, Optional
+import json
+
+
+# ======================================================================
+# CONFIGURATION
+# ======================================================================
+
+class TransformerConfig:
+    """Simple configuration container for feature transformations"""
+    def __init__(self):
+        self.input_file =  "/Users/ryanwan/Library/CloudStorage/OneDrive-R3AGroupLimited/Crypto_Scrypt/Code/datasets/btc-short-term-holder-sopr/btc-short-term-holder-sopr.csv"
+        self.output_dir = "/Users/ryanwan/Library/CloudStorage/OneDrive-R3AGroupLimited/Crypto_Scrypt/Code/datasets/btc-short-term-holder-sopr"
+        
+        # Transformation enable/disable flags
+        self.enable_raw = False
+        self.enable_roc = True
+        self.enable_zscore = True
+        self.enable_bollinger = True
+        self.enable_threshold = True
+        self.enable_rsi = True
+        self.enable_macd = True
+        self.enable_trix = False
+        self.enable_ma_oscillator = True
+        self.enable_ppo = False
+        self.enable_mass_index = False
+        self.enable_dpo = False
+        self.enable_distance_from_ema = True
+        self.enable_ichimoku = True
+        
+        # Transformation parameters with Bitcoin-optimized defaults
+        self.roc_periods = [1, 3, 6, 12, 24, 48, 72, 168, 336]
+        self.zscore_windows = [1, 3, 6, 12, 24, 36, 48, 72, 144, 168, 192, 336, 672]
+        self.bollinger_window = 20
+        self.bollinger_std = 2
+        self.threshold_window = 168
+        self.threshold_percentile_low = 20
+        self.threshold_percentile_high = 80
+        
+        # Bitcoin-specific technical indicator parameters
+        self.rsi_windows = [5, 10, 24, 48, 72, 168, 336]  # 14h (traditional), 1day, 1week
+        self.macd_configs = [
+            (12, 26, 9),      # Traditional MACD
+            (8, 21, 5),       # Faster for BTC volatility
+            (24, 72, 12),     # Daily vs 3-day with 12h signal
+            (72, 168, 24)     # 3-day vs 1-week with daily signal
+        ]
+        self.trix_windows = [14, 72, 168]  # 14h, 3day, 1week
+        self.ma_osc_configs = [
+            (4, 12, 'ema'),    # 4h vs 12h (intraday)
+            (12, 24, 'sma'),   # 12h vs 24h (daily cycle)
+            (24, 72, 'ema'),   # 1day vs 3day (short trend)
+            (72, 168, 'sma'),  # 3day vs 1week (medium trend)
+            (168, 720, 'ema')  # 1week vs 1month (long trend)
+        ]
+        self.ppo_configs = [
+            (12, 26, 9),       # Traditional
+            (8, 21, 5),        # Faster for BTC
+            (24, 72, 12)       # Daily momentum
+        ]
+        self.mass_index_configs = [
+            (9, 25),           # Traditional
+            (12, 48),          # 12h range, 2-day sum
+            (24, 168)          # Daily range, weekly sum
+        ]
+        self.dpo_windows = [3,5,10, 12, 24, 48, 72, 168] 
+        self.distance_from_ema_windows = [3, 5, 7,10, 12, 24, 48, 72, 168]  
+        self.ichimoku_configs = [
+            (9, 26),          # Traditional (9-period conversion, 26-period base)
+            (12, 48),         # 12h conversion, 2-day base
+            (24, 72),         # Daily conversion, 3-day base
+            (48, 168),        # 2-day conversion, weekly base
+            (72, 336)         # 3-day conversion, 2-week base
+        ]
+
+
+# ======================================================================
+# TRANSFORMERS
+# ======================================================================
+
+class RateOfChange:
+    """Calculate Rate of Change"""
+    def __init__(self, periods: int):
+        self.periods = periods
+    
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        feature_name = df.columns[1]
+        result = pd.DataFrame()
+        result['timestamp'] = df['timestamp']
+        result[f'{feature_name}_{self.periods}h_roc'] = df[feature_name].pct_change(self.periods) * 100
+        return result.dropna()
+    
+    def get_name(self) -> str:
+        return f'{self.periods}h_roc'
+
+
+class ZScore:
+    """Calculate rolling Z-score"""
+    def __init__(self, window: int):
+        self.window = window
+    
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        feature_name = df.columns[1]
+        rolling_mean = df[feature_name].rolling(window=self.window).mean()
+        rolling_std = df[feature_name].rolling(window=self.window).std()
+        
+        result = pd.DataFrame()
+        result['timestamp'] = df['timestamp']
+        result[f'{feature_name}_zscore_{self.window}'] = (df[feature_name] - rolling_mean) / rolling_std
+        return result.dropna()
+    
+    def get_name(self) -> str:
+        return f'zscore_{self.window}'
+
+
+class BollingerBands:
+    """Calculate Bollinger Bands metrics"""
+    def __init__(self, window: int = 20, num_std: int = 2, metric: str = 'bandwidth'):
+        self.window = window
+        self.num_std = num_std
+        self.metric = metric
+    
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        feature_name = df.columns[1]
+        rolling_mean = df[feature_name].rolling(window=self.window).mean()
+        rolling_std = df[feature_name].rolling(window=self.window).std()
+        
+        upper_band = rolling_mean + (rolling_std * self.num_std)
+        lower_band = rolling_mean - (rolling_std * self.num_std)
+        
+        result = pd.DataFrame()
+        result['timestamp'] = df['timestamp']
+        
+        if self.metric == 'bandwidth':
+            result['bb_bandwidth'] = (upper_band - lower_band) / rolling_mean
+        else:  # percent_b
+            result['bb_percent_b'] = (df[feature_name] - lower_band) / (upper_band - lower_band)
+        
+        return result.dropna()
+    
+    def get_name(self) -> str:
+        return f'bb_{self.metric}'
+
+
+class ThresholdCrossing:
+    """Detect threshold crossings"""
+    def __init__(self, window: int = 168, percentile_low: int = 20, 
+                 percentile_high: int = 80, direction: str = 'low'):
+        self.window = window
+        self.percentile_low = percentile_low
+        self.percentile_high = percentile_high
+        self.direction = direction
+    
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        feature_name = df.columns[1]
+        result = pd.DataFrame()
+        result['timestamp'] = df['timestamp']
+        
+        if self.direction == 'low':
+            threshold = df[feature_name].rolling(window=self.window).apply(
+                lambda x: np.percentile(x, self.percentile_low)
+            )
+            result['threshold_low_cross'] = (
+                (df[feature_name] <= threshold) & 
+                (df[feature_name].shift(1) > threshold)
+            ).astype(int)
+        else:  # 'high'
+            threshold = df[feature_name].rolling(window=self.window).apply(
+                lambda x: np.percentile(x, self.percentile_high)
+            )
+            result['threshold_high_cross'] = (
+                (df[feature_name] >= threshold) & 
+                (df[feature_name].shift(1) < threshold)
+            ).astype(int)
+        
+        return result.dropna()
+    
+    def get_name(self) -> str:
+        return f'threshold_{self.direction}_cross'
+
+
+class RSI:
+    """Calculate Relative Strength Index"""
+    def __init__(self, window: int = 14):
+        self.window = window
+    
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        feature_name = df.columns[1]
+        
+        # Calculate price changes
+        delta = df[feature_name].diff()
+        gains = delta.where(delta > 0, 0)
+        losses = -delta.where(delta < 0, 0)
+        
+        # Calculate average gains and losses
+        avg_gains = gains.rolling(window=self.window).mean()
+        avg_losses = losses.rolling(window=self.window).mean()
+        
+        # Calculate RSI
+        rs = avg_gains / avg_losses
+        rsi = 100 - (100 / (1 + rs))
+        
+        result = pd.DataFrame()
+        result['timestamp'] = df['timestamp']
+        result[f'{feature_name}_rsi_{self.window}'] = rsi
+        return result.dropna()
+    
+    def get_name(self) -> str:
+        return f'rsi_{self.window}'
+
+
+class MACD:
+    """Calculate MACD (Moving Average Convergence Divergence)"""
+    def __init__(self, fast_window: int = 12, slow_window: int = 26, signal_window: int = 9):
+        self.fast_window = fast_window
+        self.slow_window = slow_window
+        self.signal_window = signal_window
+    
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        feature_name = df.columns[1]
+        
+        # Calculate EMAs
+        ema_fast = df[feature_name].ewm(span=self.fast_window).mean()
+        ema_slow = df[feature_name].ewm(span=self.slow_window).mean()
+        
+        # Calculate MACD line
+        macd_line = ema_fast - ema_slow
+        
+        # Calculate signal line
+        signal_line = macd_line.ewm(span=self.signal_window).mean()
+        
+        # Calculate histogram
+        histogram = macd_line - signal_line
+        
+        # Return dictionary with separate components
+        results = {}
+        
+        # MACD Line
+        line_df = pd.DataFrame()
+        line_df['timestamp'] = df['timestamp']
+        line_df[f'{feature_name}_macd_line_{self.fast_window}_{self.slow_window}_{self.signal_window}'] = macd_line
+        results['line'] = line_df.dropna()
+        
+        # MACD Signal
+        signal_df = pd.DataFrame()
+        signal_df['timestamp'] = df['timestamp']
+        signal_df[f'{feature_name}_macd_signal_{self.fast_window}_{self.slow_window}_{self.signal_window}'] = signal_line
+        results['signal'] = signal_df.dropna()
+        
+        # MACD Histogram
+        histogram_df = pd.DataFrame()
+        histogram_df['timestamp'] = df['timestamp']
+        histogram_df[f'{feature_name}_macd_histogram_{self.fast_window}_{self.slow_window}_{self.signal_window}'] = histogram
+        results['histogram'] = histogram_df.dropna()
+        
+        return results
+    
+    def get_name(self) -> str:
+        return f'macd_{self.fast_window}_{self.slow_window}_{self.signal_window}'
+
+
+class TRIX:
+    """Calculate TRIX (Triple Exponential Average)"""
+    def __init__(self, window: int = 14):
+        self.window = window
+    
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        feature_name = df.columns[1]
+        
+        # Calculate triple exponential smoothing
+        ema1 = df[feature_name].ewm(span=self.window).mean()
+        ema2 = ema1.ewm(span=self.window).mean()
+        ema3 = ema2.ewm(span=self.window).mean()
+        
+        # Calculate TRIX as percentage change of EMA3
+        trix = ema3.pct_change() * 100
+        
+        result = pd.DataFrame()
+        result['timestamp'] = df['timestamp']
+        result[f'{feature_name}_trix_{self.window}'] = trix
+        return result.dropna()
+    
+    def get_name(self) -> str:
+        return f'trix_{self.window}'
+
+
+class MovingAverageOscillator:
+    """Calculate Moving Average Oscillator"""
+    def __init__(self, fast_window: int = 10, slow_window: int = 30, ma_type: str = 'sma'):
+        self.fast_window = fast_window
+        self.slow_window = slow_window
+        self.ma_type = ma_type  # 'sma' or 'ema'
+    
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        feature_name = df.columns[1]
+        
+        if self.ma_type == 'ema':
+            fast_ma = df[feature_name].ewm(span=self.fast_window).mean()
+            slow_ma = df[feature_name].ewm(span=self.slow_window).mean()
+        else:  # sma
+            fast_ma = df[feature_name].rolling(window=self.fast_window).mean()
+            slow_ma = df[feature_name].rolling(window=self.slow_window).mean()
+        
+        # Calculate oscillator
+        oscillator = fast_ma - slow_ma
+        
+        result = pd.DataFrame()
+        result['timestamp'] = df['timestamp']
+        result[f'{feature_name}_ma_osc_{self.fast_window}_{self.slow_window}'] = oscillator
+        return result.dropna()
+    
+    def get_name(self) -> str:
+        return f'ma_osc_{self.fast_window}_{self.slow_window}_{self.ma_type}'
+
+
+class MACDPercentagePriceOscillator:
+    """Calculate MACD Percentage Price Oscillator (PPO)"""
+    def __init__(self, fast_window: int = 12, slow_window: int = 26, signal_window: int = 9):
+        self.fast_window = fast_window
+        self.slow_window = slow_window
+        self.signal_window = signal_window
+    
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        feature_name = df.columns[1]
+        
+        # Calculate EMAs
+        ema_fast = df[feature_name].ewm(span=self.fast_window).mean()
+        ema_slow = df[feature_name].ewm(span=self.slow_window).mean()
+        
+        # Calculate PPO line (as percentage)
+        ppo_line = ((ema_fast - ema_slow) / ema_slow) * 100
+        
+        # Calculate signal line
+        signal_line = ppo_line.ewm(span=self.signal_window).mean()
+        
+        # Calculate histogram
+        histogram = ppo_line - signal_line
+        
+        # Return dictionary with separate components
+        results = {}
+        
+        # PPO Line
+        line_df = pd.DataFrame()
+        line_df['timestamp'] = df['timestamp']
+        line_df[f'{feature_name}_ppo_line_{self.fast_window}_{self.slow_window}_{self.signal_window}'] = ppo_line
+        results['line'] = line_df.dropna()
+        
+        # PPO Signal
+        signal_df = pd.DataFrame()
+        signal_df['timestamp'] = df['timestamp']
+        signal_df[f'{feature_name}_ppo_signal_{self.fast_window}_{self.slow_window}_{self.signal_window}'] = signal_line
+        results['signal'] = signal_df.dropna()
+        
+        # PPO Histogram
+        histogram_df = pd.DataFrame()
+        histogram_df['timestamp'] = df['timestamp']
+        histogram_df[f'{feature_name}_ppo_histogram_{self.fast_window}_{self.slow_window}_{self.signal_window}'] = histogram
+        results['histogram'] = histogram_df.dropna()
+        
+        return results
+    
+    def get_name(self) -> str:
+        return f'ppo_{self.fast_window}_{self.slow_window}_{self.signal_window}'
+
+
+class MassIndex:
+    """Calculate Mass Index Indicator"""
+    def __init__(self, period: int = 9, sum_period: int = 25):
+        self.period = period  # Period for EMA calculation
+        self.sum_period = sum_period  # Period for summing the ratio
+    
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        feature_name = df.columns[1]
+        
+        # For single-column data, we'll use the difference between rolling max and min
+        # as a proxy for high-low range
+        rolling_max = df[feature_name].rolling(window=self.period).max()
+        rolling_min = df[feature_name].rolling(window=self.period).min()
+        high_low = rolling_max - rolling_min
+        
+        # Calculate EMA of high-low
+        ema_hl = high_low.ewm(span=self.period).mean()
+        
+        # Calculate ratio and its sum
+        ratio = high_low / ema_hl
+        mass_index = ratio.rolling(window=self.sum_period).sum()
+        
+        result = pd.DataFrame()
+        result['timestamp'] = df['timestamp']
+        result[f'{feature_name}_mass_index_{self.period}_{self.sum_period}'] = mass_index
+        return result.dropna()
+    
+    def get_name(self) -> str:
+        return f'mass_index_{self.period}_{self.sum_period}'
+
+
+class DetrendedPriceOscillator:
+    """Calculate Detrended Price Oscillator (DPO)"""
+    def __init__(self, window: int = 20):
+        self.window = window
+    
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        feature_name = df.columns[1]
+        
+        # Calculate simple moving average
+        sma = df[feature_name].rolling(window=self.window).mean()
+        
+        # Shift the SMA back by (window/2 + 1) periods to remove trend
+        shift_periods = self.window // 2 + 1
+        sma_shifted = sma.shift(shift_periods)
+        
+        # Calculate DPO: Current price - shifted SMA
+        dpo = df[feature_name] - sma_shifted
+        
+        result = pd.DataFrame()
+        result['timestamp'] = df['timestamp']
+        result[f'{feature_name}_dpo_{self.window}'] = dpo
+        return result.dropna()
+    
+    def get_name(self) -> str:
+        return f'dpo_{self.window}'
+
+
+class DistanceFromEMA:
+    """Calculate Distance from EMA (Normalized by Price)"""
+    def __init__(self, window: int = 12):
+        self.window = window
+    
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        feature_name = df.columns[1]
+        
+        # Calculate EMA
+        ema = df[feature_name].ewm(span=self.window).mean()
+        
+        # Calculate distance from EMA, normalized by price
+        distance_from_ema = ((df[feature_name] - ema) / df[feature_name]) * 100
+        
+        result = pd.DataFrame()
+        result['timestamp'] = df['timestamp']
+        result[f'{feature_name}_dist_from_ema_{self.window}'] = distance_from_ema
+        return result.dropna()
+    
+    def get_name(self) -> str:
+        return f'dist_from_ema_{self.window}'
+
+
+class IchimokuCloud:
+    """Calculate Ichimoku Cloud Components (Conversion Line and Base Line)"""
+    def __init__(self, conversion_window: int = 9, base_window: int = 26):
+        self.conversion_window = conversion_window
+        self.base_window = base_window
+    
+    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
+        feature_name = df.columns[1]
+        
+        # Calculate Conversion Line (Tenkan-sen): (Highest High + Lowest Low) / 2 over conversion_window
+        conversion_high = df[feature_name].rolling(window=self.conversion_window).max()
+        conversion_low = df[feature_name].rolling(window=self.conversion_window).min()
+        conversion_line = (conversion_high + conversion_low) / 2
+        
+        # Calculate Base Line (Kijun-sen): (Highest High + Lowest Low) / 2 over base_window
+        base_high = df[feature_name].rolling(window=self.base_window).max()
+        base_low = df[feature_name].rolling(window=self.base_window).min()
+        base_line = (base_high + base_low) / 2
+        
+        # Return dictionary with separate components
+        results = {}
+        
+        # Conversion Line
+        conversion_df = pd.DataFrame()
+        conversion_df['timestamp'] = df['timestamp']
+        conversion_df[f'{feature_name}_ichimoku_conversion_{self.conversion_window}_{self.base_window}'] = conversion_line
+        results['conversion'] = conversion_df.dropna()
+        
+        # Base Line
+        base_df = pd.DataFrame()
+        base_df['timestamp'] = df['timestamp']
+        base_df[f'{feature_name}_ichimoku_base_{self.conversion_window}_{self.base_window}'] = base_line
+        results['base'] = base_df.dropna()
+        
+        return results
+    
+    def get_name(self) -> str:
+        return f'ichimoku_{self.conversion_window}_{self.base_window}'
+
+
+# ======================================================================
+# MAIN FUNCTIONS
+# ======================================================================
+
+def load_data(file_path: str) -> pd.DataFrame:
+    """Load and preprocess data"""
+    print(f"Loading data from {file_path}...")
+    
+    df = pd.read_csv(file_path)
+    
+    if len(df.columns) < 2:
+        raise ValueError(f"Input file must have at least 2 columns, found {df.columns}")
+    
+    # Standardize first column as timestamp
+    df.columns = ['timestamp'] + list(df.columns[1:])
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df = df.sort_values('timestamp')
+    
+    # Handle missing values
+    if df.isnull().sum().sum() > 0:
+        print(f"Found {df.isnull().sum().sum()} missing values, filling...")
+        df = df.fillna(method='ffill')
+    
+    print(f"Loaded {len(df)} rows")
+    return df
+
+
+def create_transformers(config: TransformerConfig) -> List:
+    """Create all transformers based on config"""
+    transformers = []
+    
+    # Add raw data (just copy) - if enabled
+    if config.enable_raw:
+        transformers.append(('raw', lambda df: df[['timestamp', df.columns[1]]].copy()))
+    
+    # Rate of change transformers - if enabled
+    if config.enable_roc:
+        for period in config.roc_periods:
+            transformers.append((f'{period}h_roc', RateOfChange(period)))
+    
+    # Z-score transformers - if enabled
+    if config.enable_zscore:
+        for window in config.zscore_windows:
+            transformers.append((f'zscore_{window}', ZScore(window)))
+    
+    # Bollinger Bands - if enabled
+    if config.enable_bollinger:
+        transformers.append(('bb_bandwidth', BollingerBands(config.bollinger_window, config.bollinger_std, 'bandwidth')))
+        transformers.append(('bb_percent_b', BollingerBands(config.bollinger_window, config.bollinger_std, 'percent_b')))
+    
+    # Threshold crossings - if enabled
+    if config.enable_threshold:
+        transformers.append(('threshold_low', ThresholdCrossing(
+            config.threshold_window, config.threshold_percentile_low, 
+            config.threshold_percentile_high, 'low'
+        )))
+        transformers.append(('threshold_high', ThresholdCrossing(
+            config.threshold_window, config.threshold_percentile_low,
+            config.threshold_percentile_high, 'high'
+        )))
+    
+    # RSI - if enabled
+    if config.enable_rsi:
+        for window in config.rsi_windows:
+            transformers.append((f'rsi_{window}', RSI(window)))
+    
+    # MACD - if enabled
+    if config.enable_macd:
+        for fast, slow, signal in config.macd_configs:
+            # Create separate transformers for each MACD component
+            def create_macd_line_transformer(f, s, sig):
+                def macd_line_transform(df):
+                    macd = MACD(f, s, sig)
+                    return macd.transform(df)['line']
+                return macd_line_transform
+            
+            def create_macd_signal_transformer(f, s, sig):
+                def macd_signal_transform(df):
+                    macd = MACD(f, s, sig)
+                    return macd.transform(df)['signal']
+                return macd_signal_transform
+            
+            def create_macd_histogram_transformer(f, s, sig):
+                def macd_histogram_transform(df):
+                    macd = MACD(f, s, sig)
+                    return macd.transform(df)['histogram']
+                return macd_histogram_transform
+            
+            transformers.append((f'macd_line_{fast}_{slow}_{signal}', create_macd_line_transformer(fast, slow, signal)))
+            transformers.append((f'macd_signal_{fast}_{slow}_{signal}', create_macd_signal_transformer(fast, slow, signal)))
+            transformers.append((f'macd_histogram_{fast}_{slow}_{signal}', create_macd_histogram_transformer(fast, slow, signal)))
+    
+    # TRIX - if enabled
+    if config.enable_trix:
+        for window in config.trix_windows:
+            transformers.append((f'trix_{window}', TRIX(window)))
+    
+    # Moving Average Oscillator - if enabled
+    if config.enable_ma_oscillator:
+        for fast, slow, ma_type in config.ma_osc_configs:
+            transformers.append((f'ma_osc_{fast}_{slow}_{ma_type}', MovingAverageOscillator(fast, slow, ma_type)))
+    
+    # MACD Percentage Price Oscillator - if enabled
+    if config.enable_ppo:
+        for fast, slow, signal in config.ppo_configs:
+            # Create separate transformers for each PPO component
+            def create_ppo_line_transformer(f, s, sig):
+                def ppo_line_transform(df):
+                    ppo = MACDPercentagePriceOscillator(f, s, sig)
+                    return ppo.transform(df)['line']
+                return ppo_line_transform
+            
+            def create_ppo_signal_transformer(f, s, sig):
+                def ppo_signal_transform(df):
+                    ppo = MACDPercentagePriceOscillator(f, s, sig)
+                    return ppo.transform(df)['signal']
+                return ppo_signal_transform
+            
+            def create_ppo_histogram_transformer(f, s, sig):
+                def ppo_histogram_transform(df):
+                    ppo = MACDPercentagePriceOscillator(f, s, sig)
+                    return ppo.transform(df)['histogram']
+                return ppo_histogram_transform
+            
+            transformers.append((f'ppo_line_{fast}_{slow}_{signal}', create_ppo_line_transformer(fast, slow, signal)))
+            transformers.append((f'ppo_signal_{fast}_{slow}_{signal}', create_ppo_signal_transformer(fast, slow, signal)))
+            transformers.append((f'ppo_histogram_{fast}_{slow}_{signal}', create_ppo_histogram_transformer(fast, slow, signal)))
+    
+    # Mass Index - if enabled
+    if config.enable_mass_index:
+        for period, sum_period in config.mass_index_configs:
+            transformers.append((f'mass_index_{period}_{sum_period}', MassIndex(period, sum_period)))
+    
+    # Detrended Price Oscillator - if enabled
+    if config.enable_dpo:
+        for window in config.dpo_windows:
+            transformers.append((f'dpo_{window}', DetrendedPriceOscillator(window)))
+    
+    # Distance from EMA - if enabled
+    if config.enable_distance_from_ema:
+        for window in config.distance_from_ema_windows:
+            transformers.append((f'dist_from_ema_{window}', DistanceFromEMA(window)))
+    
+    # Ichimoku Cloud - if enabled
+    if config.enable_ichimoku:
+        for conversion_window, base_window in config.ichimoku_configs:
+            # Create separate transformers for each Ichimoku component
+            def create_ichimoku_conversion_transformer(conv, base):
+                def ichimoku_conversion_transform(df):
+                    ichimoku = IchimokuCloud(conv, base)
+                    return ichimoku.transform(df)['conversion']
+                return ichimoku_conversion_transform
+            
+            def create_ichimoku_base_transformer(conv, base):
+                def ichimoku_base_transform(df):
+                    ichimoku = IchimokuCloud(conv, base)
+                    return ichimoku.transform(df)['base']
+                return ichimoku_base_transform
+            
+            transformers.append((f'ichimoku_conversion_{conversion_window}_{base_window}', create_ichimoku_conversion_transformer(conversion_window, base_window)))
+            transformers.append((f'ichimoku_base_{conversion_window}_{base_window}', create_ichimoku_base_transformer(conversion_window, base_window)))
+    
+    return transformers
+
+
+def run_transformations(df: pd.DataFrame, transformers: List) -> Dict[str, pd.DataFrame]:
+    """Run all transformations on the data"""
+    results = {}
+    
+    print(f"\nRunning {len(transformers)} transformations...")
+    
+    for name, transformer in transformers:
+        try:
+            print(f"  Applying {name}...", end='')
+            
+            # Handle both function and class transformers
+            if callable(transformer) and not hasattr(transformer, 'transform'):
+                result = transformer(df)
+            else:
+                result = transformer.transform(df)
+            
+            results[name] = result
+            print(f" {len(result)} rows")
+            
+        except Exception as e:
+            print(f" Failed: {e}")
+            continue
+    
+    return results
+
+
+def save_results(results: Dict[str, pd.DataFrame], config: TransformerConfig):
+    """Save all transformation results"""
+    base_filename = os.path.splitext(os.path.basename(config.input_file))[0]
+    output_dir = os.path.join(config.output_dir, base_filename)
+    os.makedirs(output_dir, exist_ok=True)
+    
+    print(f"\nSaving results to {output_dir}...")
+    
+    for name, df in results.items():
+        clean_basename = base_filename.replace("_price", "").replace("price_", "").replace("price", "")
+        clean_basename = clean_basename.replace("__", "_").strip("_")
+        filename = f"{clean_basename}_{name}.csv"
+        filepath = os.path.join(output_dir, filename)
+        df.to_csv(filepath, index=False)
+        print(f"  Saved {filename} ({len(df)} rows)")
+
+
+def main():
+    """Main execution"""
+    # Example configuration - update these paths
+    config = TransformerConfig()
+    
+    # Check if input file exists
+    if not os.path.isfile(config.input_file):
+        print(f"Error: Input file '{config.input_file}' not found")
+        print("Please update the input_file path in the main() function")
+        sys.exit(1)
+    
+    try:
+        # Load data
+        data = load_data(config.input_file)
+        
+        # Create transformers
+        transformers = create_transformers(config)
+        
+        # Run transformations
+        results = run_transformations(data, transformers)
+        
+        # Save results
+        save_results(results, config)
+        
+        # Print summary
+        print(f"\nTransformation Summary:")
+        print(f"  Total transformations: {len(results)}")
+        print(f"  Output directory: {os.path.join(config.output_dir, os.path.splitext(os.path.basename(config.input_file))[0])}")
+        print("\nCompleted successfully!")
+        
+    except Exception as e:
+        print(f"\nError: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main() 
