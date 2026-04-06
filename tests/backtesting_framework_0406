@@ -1,0 +1,3252 @@
+"""
+Backtest Framework for Trading Strategies
+
+This script provides a clean framework for backtesting trading strategies
+based on various feature inputs with customizable entry/exit conditions.
+"""
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from datetime import datetime, timedelta
+import os
+import glob
+import warnings
+from typing import Dict, Tuple, List, Optional
+import multiprocessing as mp
+from functools import partial
+import time
+import itertools
+
+warnings.filterwarnings("ignore", category=UserWarning)
+
+
+class BacktestConfig:
+    """Configuration container for backtest parameters"""
+    def __init__(self):
+        # File paths - auto-detect files in current directory
+        self.price_file = None # DONT CHANGE
+        self.feature_file = None # DONT CHANGE
+        self.output_dir = "outputTest" # DONT CHANGE
+        self.output_prefix = "strategy"
+        
+        # Auto-detect files in current directory
+
+        csv_files = glob.glob("*.csv")
+        
+        if len(csv_files) >= 2:
+            # Method 1: Look for files with 'price' in the name
+            price_files = [f for f in csv_files if 'price' in f.lower()]
+            if price_files:
+                self.price_file = price_files[0]
+                # Feature file is the other file
+                feature_files = [f for f in csv_files if f != self.price_file]
+                if feature_files:
+                    self.feature_file = feature_files[0]
+            else:
+                # Method 2: Use any two CSV files (first two found)
+                self.price_file = csv_files[0]
+                self.feature_file = csv_files[1]
+            
+            print(f"Auto-detected files:")
+            print(f"  Price file: {self.price_file}")
+            print(f"  Feature file: {self.feature_file}")
+        
+        # Fallback to hardcoded names if no files detected 
+        # ##### CHANGE HERE #####
+        if not self.price_file:
+            self.price_file = "/Users/ryanwan/Library/CloudStorage/OneDrive-R3AGroupLimited/Crypto_Scrypt/Code/datasets/btc-price_hourly.csv"
+            self.feature_file = "/Users/ryanwan/Library/CloudStorage/OneDrive-R3AGroupLimited/Crypto_Scrypt/Code/datasets/btc-options-atm-implied-volatility-3-months/btc-options-atm-implied-volatility-3-months/btc-options-atm-implied-volatility-3-months_zscore_168.csv"
+            self.output_dir = "/Users/ryanwan/Library/CloudStorage/OneDrive-R3AGroupLimited/Crypto_Scrypt/Code/backtests/btc_options_deltaskew25_3month/zscore/shorting/168h"
+            
+            # Check if hardcoded files exist
+            current_dir = os.getcwd()
+            if not os.path.exists(self.price_file):
+                price_path = os.path.join(current_dir, self.price_file)
+                feature_path = os.path.join(current_dir, self.feature_file)
+                
+                if os.path.exists(price_path):
+                    self.price_file = price_path
+                    self.feature_file = feature_path
+                    print(f"Using absolute paths: {self.price_file}")
+                else:
+                    print(f"Warning: Could not find CSV files in current directory: {current_dir}")
+                    print(f"Looking for: {self.price_file} and {self.feature_file}")
+                    print(f"Make sure you're running the script from the correct directory or the files are uploaded to AWS S3.")
+        
+        self.start_date = "2021-01-01"
+        # Portfolio settings
+        self.initial_portfolio = 1000000.0
+        self.base_position_size = 0.1
+        #self.base_position_size = 0.1
+        self.transaction_cost = 0.00025
+        self.risk_free_rate = 0.036
+        
+        # Entry/Exit parameter
+        self.entry_threshold = -1.38
+        self.entry_direction = "above"
+        self.exit_threshold = 1.59
+        self.exit_direction = "below"
+        self.max_hold_hours = 72
+ 
+        # Feature settings
+        self.feature_type = "zscore" # Options: "zscore", "roc", "percent_b", "bandwidth", "threshold_cross"
+        self.feature_column = None
+        self.price_column = None
+ 
+        # Stop Loss and Take Profit settings
+        self.stop_loss_enabled = False
+        self.stop_loss_percentage = -0.03  # 5% stop loss (negative value)
+        self.take_profit_enabled =False
+        self.take_profit_percentage = 0.1 # 10% take profit (positive value)
+ 
+
+        # Position sizing
+        self.sigmoid_midpoint = 2.0
+        self.sigmoid_steepness = 1.0
+        self.min_position_factor = 0.25
+        self.max_position_factor = 4.0
+        self.target_mean_factor = 2.0
+
+        # Date parsing settings
+        self.date_format = None  # If None, will auto-detect. Otherwise specify format like '%Y-%m-%d %H:%M:%S'
+        self.dayfirst = True  # For ambiguous dates, prefer DD/MM/YYYY over MM/DD/YYYY
+        
+        # Feature lagging settings
+        self.feature_lag_periods = 0  # Number of periods to lag the feature data (0 = no lag)
+        
+        # Monte Carlo settings
+        self.monte_carlo_enabled = False
+        self.monte_carlo_iterations = 1000
+        self.monte_carlo_seed = 42
+        # Note: Sigmoid recalibration removed - features are fixed in Monte Carlo,
+        # only prices are shuffled, so sigmoid parameters should remain unchanged
+        
+        # Parallel processing settings
+        self.parallel_mode = True  # Enable/disable parallel processing
+        self.num_processes = None  # None = use all available cores
+        
+        # Walkforward settings
+        self.walkforward_enabled = False
+        self.walkforward_period = 'month'
+        self.walkforward_train = 12
+        self.walkforward_test = 6
+        self.walkforward_step = 3
+ 
+        # Walkforward Monte Carlo settings
+        self.walkforward_monte_carlo_enabled = False  # New parameter
+
+        # Grid Search settings
+        self.grid_search_enabled = True
+        self.grid_search_params =   {
+            'entry_threshold': [1.8, 2],
+            'exit_threshold': [-1.5, -1.7],
+            'base_position_size': [0.1, 0.15, 0.2],
+            'max_hold_hours': [24, 48, 72, 120, 168],
+            'stop_loss_enabled': [True],
+            'stop_loss_percentage': [-0.03,-0.05, -0.08],  # Only used if stop_loss_enabled=True
+            'take_profit_enabled': [True],
+            'take_profit_percentage': [0.05,0.1],   # Only used if take_profit_enabled=True
+        }
+        self.grid_search_objectives = ['sharpe_ratio', 'total_return', 'profit_factor']  # Optimization objectives
+
+        # Trading mode configuration
+        self.trading_mode = "short_only"  # Options: "long_only", "short_only"
+        
+        # Leverage and borrowing settings
+        self.leverage_multiplier = 1  # Default no leverage (1.0), can be increased later
+        self.max_leverage = 1  # Maximum allowed leverage
+        self.borrowing_rate_annual = 0.0  # 1% annual borrowing rate for shorts
+        self.borrowing_setup_fee = 0.0  # Setup fee for short positions (set to 0 for now)
+
+class DataHandler:
+    """Handles data loading and merging"""
+    
+    def __init__(self, config: BacktestConfig):
+        self.config = config
+        self.merged_data = None
+        self.feature_column = None
+        self.price_column = None
+    
+    def load_and_merge(self) -> pd.DataFrame:
+        """Load price and feature data, merge on timestamp"""
+        print(f"Loading price data from {self.config.price_file}...")
+        price_data = self._load_csv(self.config.price_file)
+        price_data = price_data[price_data['timestamp'] >= self.config.start_date]
+        print(f"Loading feature data from {self.config.feature_file}...")
+        feature_data = self._load_csv(self.config.feature_file)
+        
+        # Detect feature column
+        self.feature_column = self._detect_feature_column(feature_data)
+        feature_data = feature_data[['timestamp', self.feature_column]]
+        
+        # Ensure consistent timestamp handling
+        price_data['timestamp'] = pd.to_datetime(price_data['timestamp'])
+        feature_data['timestamp'] = pd.to_datetime(feature_data['timestamp'])
+        
+        # Sort by timestamp to ensure consistent merging
+        price_data = price_data.sort_values('timestamp')
+        feature_data = feature_data.sort_values('timestamp')
+
+        # Ensure consistent data types before merging
+        price_data = price_data.astype({col: 'float64' for col in price_data.columns if col != 'timestamp'})
+        feature_data = feature_data.astype({col: 'float64' for col in feature_data.columns if col != 'timestamp'})
+        
+        # Apply feature lagging if specified
+        if self.config.feature_lag_periods > 0:
+            print(f"Applying {self.config.feature_lag_periods} period lag to feature data...")
+            # Shift all feature columns (except timestamp) forward by the specified number of periods
+            # This creates a lag effect where feature[t] now represents the value from feature[t-lag]
+            feature_columns = [col for col in feature_data.columns if col != 'timestamp']
+            for col in feature_columns:
+                feature_data[col] = feature_data[col].shift(self.config.feature_lag_periods)
+            # Remove rows with NaN values created by the shift
+            feature_data = feature_data.dropna()
+            print(f"Lagged columns: {feature_columns}")
+            print(f"Feature data after lagging: {len(feature_data)} rows remaining")
+        
+        # Merge data
+        print("Merging data...")
+        self.merged_data = pd.merge_asof(price_data, feature_data, on='timestamp')
+        
+        # Handle missing and infinite values consistently
+        self.merged_data[self.feature_column] = self.merged_data[self.feature_column].replace([np.inf, -np.inf], np.nan)
+        self.merged_data = self.merged_data.ffill()
+        
+        # Detect price column
+        self.price_column = self._detect_price_column(self.merged_data)
+        
+        # Final cleanup
+        self.merged_data = self.merged_data.ffill()
+        self.merged_data = self.merged_data.dropna()
+        
+        # Ensure consistent data types
+        self.merged_data = self.merged_data.astype({
+            self.feature_column: 'float64',
+            self.price_column: 'float64'
+        })
+        
+        print(f"Data merged successfully. Rows: {len(self.merged_data)}")
+        return self.merged_data
+    
+    def _load_csv(self, filepath: str) -> pd.DataFrame:
+        """Load CSV and standardize timestamp column"""
+        df = pd.read_csv(filepath)
+        
+        # Find and rename timestamp column
+        timestamp_col = None
+        for col in df.columns:
+            if 'time' in col.lower() or 'date' in col.lower():
+                timestamp_col = col
+                break
+        
+        if timestamp_col is None:
+            timestamp_col = df.columns[0]
+        
+        df = df.rename(columns={timestamp_col: 'timestamp'})
+        
+        # Try to detect date format by examining the first few non-null timestamp values
+        sample_dates = df['timestamp'].dropna().head(10).astype(str).tolist()
+        date_format = self.config.date_format  # Use config format if specified
+        
+        # If no format specified in config, try to auto-detect
+        if date_format is None:
+            # Common date formats to try
+            date_formats = [
+                '%Y-%m-%d %H:%M:%S',  # 2019-11-01 00:00:00
+                '%Y-%m-%d',           # 2019-11-01
+                '%d/%m/%Y %H:%M',     # 17/07/2010 23:00 (DD/MM/YYYY HH:MM)
+                '%d/%m/%Y %H:%M:%S',  # 01/11/2019 00:00:00 (DD/MM/YYYY)
+                '%m/%d/%Y %H:%M:%S',  # 11/01/2019 00:00:00 (MM/DD/YYYY)
+                '%d/%m/%Y',           # 01/11/2019 (DD/MM/YYYY)
+                '%m/%d/%Y',           # 11/01/2019 (MM/DD/YYYY)
+                '%Y/%m/%d %H:%M:%S',  # 2019/11/01 00:00:00
+                '%Y/%m/%d',           # 2019/11/01
+                '%d-%m-%Y %H:%M:%S',  # 01-11-2019 00:00:00
+                '%m-%d-%Y %H:%M:%S',  # 11-01-2019 00:00:00
+                '%d-%m-%Y',           # 01-11-2019
+                '%m-%d-%Y',           # 11-01-2019
+            ]
+            
+            # Try each format and see which one works consistently
+            for fmt in date_formats:
+                try:
+                    # Try parsing all sample dates with this format
+                    parsed_dates = []
+                    for date_str in sample_dates:
+                        parsed_dates.append(pd.to_datetime(date_str, format=fmt))
+                    
+                    # If all samples parsed successfully, use this format
+                    date_format = fmt
+                    print(f"Detected date format: {fmt}")
+                    break
+                except:
+                    continue
+        
+        # Parse timestamps with detected format or let pandas infer
+        if date_format:
+            df['timestamp'] = pd.to_datetime(df['timestamp'], format=date_format)
+        else:
+            # If no format detected, use dayfirst setting from config
+            df['timestamp'] = pd.to_datetime(df['timestamp'], dayfirst=self.config.dayfirst)
+            print(f"Warning: Could not detect specific date format. Using pandas inference with dayfirst={self.config.dayfirst}")
+        
+        # Verify dates are reasonable (should be between 2010 and 2030 for crypto data)
+        min_date = df['timestamp'].min()
+        max_date = df['timestamp'].max()
+        if min_date.year < 2010 or max_date.year > 2030:
+            print(f"Warning: Unusual date range detected: {min_date} to {max_date}")
+            print("This might indicate a date parsing issue.")
+        
+        df = df.sort_values('timestamp')
+        
+        # Debug output
+        print(f"Loaded {filepath}:")
+        print(f"  Date range: {min_date} to {max_date}")
+        print(f"  Number of rows: {len(df)}")
+        
+        return df
+    
+    def _detect_feature_column(self, df: pd.DataFrame) -> str:
+        """Detect the feature column from dataframe"""
+        timestamp_cols = ['timestamp', 'time', 'date']
+        potential_cols = [col for col in df.columns if col.lower() not in timestamp_cols]
+        
+        if self.config.feature_column and self.config.feature_column in potential_cols:
+            return self.config.feature_column
+        
+        if len(potential_cols) == 1:
+            return potential_cols[0]
+        
+        # Try to match feature type
+        for col in potential_cols:
+            if self.config.feature_type.lower() in col.lower():
+                return col
+        
+        # Default to first non-timestamp column
+        return potential_cols[0] if potential_cols else None
+    
+    def _detect_price_column(self, df: pd.DataFrame) -> str:
+        """Detect the price column from dataframe"""
+        for col in df.columns:
+            if 'price' in col.lower() or 'close' in col.lower():
+                return col
+        
+        # Default to second column if not found
+        non_timestamp_cols = [col for col in df.columns if col != 'timestamp']
+        return non_timestamp_cols[0] if non_timestamp_cols else None
+
+
+class PositionManager:
+    """Manages position sizing and tracking"""
+    
+    def __init__(self, config: BacktestConfig):
+        self.config = config
+        self.positions = []
+        self.trade_id_counter = 0
+    
+    def calculate_position_size_factor(self, feature_value: float) -> float:
+        """Calculate position size factor using sigmoid function"""
+        # Check if feature value meets entry criteria
+        if self.config.entry_direction == "above":
+            if feature_value <= self.config.entry_threshold:
+                return 0.0
+        else:  # below
+            if feature_value >= self.config.entry_threshold:
+                return 0.0
+        
+        # Normalize feature value based on entry direction
+        if self.config.entry_direction == "above":
+            # For "above" entries: higher values = stronger signal
+            normalized = (feature_value - self.config.entry_threshold) / (self.config.sigmoid_midpoint - self.config.entry_threshold)
+        else:  # below
+            # For "below" entries: lower values = stronger signal
+            normalized = (self.config.entry_threshold - feature_value) / (self.config.entry_threshold - self.config.sigmoid_midpoint)
+        
+        # Apply sigmoid with fixed precision
+        try:
+            exponent = float(self.config.sigmoid_steepness * (normalized - 1))
+            exponent = max(-700, min(700, exponent))  # Prevent overflow
+            sigmoid_value = float(1 / (1 + np.exp(-exponent)))
+        except:
+            sigmoid_value = 0.99 if normalized > 1 else 0.01
+        
+        # Scale to desired range with fixed precision
+        factor = float(self.config.min_position_factor + sigmoid_value * (self.config.max_position_factor - self.config.min_position_factor))
+        
+        # Ensure final value is within bounds with fixed precision
+        return float(max(self.config.min_position_factor, min(self.config.max_position_factor, factor)))
+    
+    def open_position(self, timestamp: datetime, price: float, feature_value: float, btc_amount: float, size_factor: float, direction: int = 1) -> Dict:
+        """Open a new position with direction support"""
+        self.trade_id_counter += 1
+        position = {
+            'id': self.trade_id_counter,
+            'entry_time': timestamp,
+            'entry_price': price,
+            'entry_feature': feature_value,
+            'btc_amount': btc_amount,
+            'size_factor': size_factor,
+            'direction': direction  # 1 for long, -1 for short
+        }
+        self.positions.append(position)
+        return position
+    
+    def check_exit_conditions(self, timestamp: datetime, feature_value: float, current_price: float) -> List[Tuple[Dict, str]]:
+        """Check which positions should be closed based on exit conditions"""
+        positions_to_close = []
+
+        for pos in self.positions:
+            exit_reasons = []
+            
+            # Check max hold time
+            hold_time = (timestamp - pos['entry_time']).total_seconds() / 3600
+            if hold_time >= self.config.max_hold_hours:
+                exit_reasons.append("TIME_LIMIT")
+    
+            # Check feature exit condition based on direction
+            if self.config.exit_direction == "above":
+                if feature_value > self.config.exit_threshold:
+                    exit_reasons.append("FEATURE_EXIT")
+            else:  # below
+                if feature_value < self.config.exit_threshold:
+                    exit_reasons.append("FEATURE_EXIT")
+            
+            # Check stop loss and take profit based on position direction
+            if current_price > 0 and pos['entry_price'] > 0:
+                position_direction = pos.get('direction', 1)  # Default to long if not specified
+                
+                # Calculate price change percentage from entry price
+                price_change_pct = (current_price - pos['entry_price']) / pos['entry_price']
+                
+                if position_direction == 1:  # Long position
+                    # Check stop loss
+                    if self.config.stop_loss_enabled and price_change_pct <= self.config.stop_loss_percentage:
+                        exit_reasons.append("STOP_LOSS")
+                    
+                    # Check take profit
+                    if self.config.take_profit_enabled and price_change_pct >= self.config.take_profit_percentage:
+                        exit_reasons.append("TAKE_PROFIT")
+                        
+                else:  # Short position (direction == -1)
+                    # For shorts: price going up is bad (stop loss), price going down is good (take profit)
+                    # Check stop loss (price increase hurts short positions)
+                    if self.config.stop_loss_enabled and price_change_pct >= abs(self.config.stop_loss_percentage):
+                        exit_reasons.append("STOP_LOSS")
+                    
+                    # Check take profit (price decrease helps short positions)
+                    if self.config.take_profit_enabled and price_change_pct <= -self.config.take_profit_percentage:
+                        exit_reasons.append("TAKE_PROFIT")
+            
+            # If any exit conditions are met, add to positions to close
+            if exit_reasons:
+                combined_reason = "+".join(exit_reasons)
+                positions_to_close.append((pos, combined_reason))
+
+        return positions_to_close
+
+    
+    def close_positions(self, positions_to_close: List[Tuple[Dict, str]]):
+        """Remove closed positions from tracking"""
+        closed_ids = {pos[0]['id'] for pos in positions_to_close}
+        self.positions = [pos for pos in self.positions if pos['id'] not in closed_ids]
+    
+    def calibrate_sigmoid(self, feature_values: np.ndarray):
+        """Calibrate sigmoid parameters for target mean position size"""
+        # Filter values based on entry direction
+        if self.config.entry_direction == "above":
+            valid_values = feature_values[feature_values > self.config.entry_threshold]
+        else:  # below
+            valid_values = feature_values[feature_values < self.config.entry_threshold]
+        
+        if len(valid_values) == 0:
+            return
+    
+        # Set initial midpoint based on entry direction
+        if self.config.entry_direction == "above":
+            # For "above" entries: use 75th percentile as midpoint
+            self.config.sigmoid_midpoint = np.percentile(valid_values, 75)
+        else:  # below
+            # For "below" entries: use 25th percentile as midpoint
+            self.config.sigmoid_midpoint = np.percentile(valid_values, 25)
+        
+        # Ensure minimum distance from entry threshold
+        if abs(self.config.sigmoid_midpoint - self.config.entry_threshold) < 0.001:
+            if self.config.entry_direction == "above":
+                self.config.sigmoid_midpoint = self.config.entry_threshold + 0.001
+            else:
+                self.config.sigmoid_midpoint = self.config.entry_threshold - 0.001
+        
+        # Calculate mean factor and adjust
+        attempts = 0
+        while attempts < 10:
+            factors = [self.calculate_position_size_factor(v) for v in valid_values]
+            current_mean = np.mean(factors)
+            
+            if abs(current_mean - self.config.target_mean_factor) < 0.1:
+                break
+            
+            # Adjust midpoint based on entry direction
+            if self.config.entry_direction == "above":
+                if current_mean < self.config.target_mean_factor:
+                    self.config.sigmoid_midpoint *= 0.9
+                else:
+                    self.config.sigmoid_midpoint *= 1.1
+            else:  # below
+                if current_mean < self.config.target_mean_factor:
+                    self.config.sigmoid_midpoint *= 1.1
+                else:
+                    self.config.sigmoid_midpoint *= 0.9
+            
+            attempts += 1
+        
+        print(f"Calibrated sigmoid: midpoint={self.config.sigmoid_midpoint:.4f}")
+
+
+class BacktestEngine:
+    """Main backtest execution engine"""
+    
+    def __init__(self, config: BacktestConfig, data: pd.DataFrame, feature_col: str, price_col: str):
+        self.config = config
+        self.data = data
+        self.feature_col = feature_col
+        self.price_col = price_col
+        self.position_manager = PositionManager(config)
+        
+        # Portfolio state
+        self.cash = config.initial_portfolio
+        self.btc_held = 0.0  # BTC held in long positions
+        self.btc_borrowed = 0.0  # BTC borrowed for short positions
+        self.initial_equity = config.initial_portfolio  # Track original capital
+        self.trades = []
+        self.portfolio_history = []
+        
+        # Borrowing cost tracking
+        self.borrowing_rate_hourly = config.borrowing_rate_annual / 365.25 / 24  # Convert annual to hourly
+        self.last_borrowing_cost_time = None
+        
+        # Debug logging
+        self.debug_log = []
+    
+    def run(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
+        """Run the backtest simulation"""
+        print("Running backtest...")
+        
+        # Log initial data state
+        self.debug_log.append(f"Initial data shape: {self.data.shape}")
+        self.debug_log.append(f"First few rows of data:")
+        self.debug_log.append(str(self.data.head()))
+        
+        # Add initial portfolio state
+        self._record_portfolio_state(0)
+        
+        # Main backtest loop
+        for i in range(1, len(self.data)):
+            current_time = self.data.iloc[i]['timestamp']
+            current_price = float(self.data.iloc[i][self.price_col])
+            current_feature = float(self.data.iloc[i][self.feature_col])
+            
+            # Log current state
+            if i % 1000 == 0:  # Log every 1000th iteration
+                self.debug_log.append(f"\nIteration {i}:")
+                self.debug_log.append(f"Time: {current_time}")
+                self.debug_log.append(f"Price: {current_price}")
+                self.debug_log.append(f"Feature: {current_feature}")
+                self.debug_log.append(f"Cash: {self.cash}")
+                self.debug_log.append(f"BTC held: {self.btc_held}")
+            
+            # Check exit conditions
+            positions_to_close = self.position_manager.check_exit_conditions(current_time, current_feature, current_price)
+            
+            # Remove the problematic scaling logic that was preventing short closures
+            # (The _execute_trades method now handles balance checks properly)
+            # Calculate net position change
+            # total_btc_to_sell = sum(pos[0]['btc_amount'] for pos in positions_to_close)
+
+            # if total_btc_to_sell > self.btc_held and self.config.trading_mode == "long_only":
+            #     scale_factor = self.btc_held / total_btc_to_sell if total_btc_to_sell > 0 else 0
+            #     # print(f"Warning: Attempting to sell more BTC than held. Scaling down by {scale_factor:.4f}")
+            #     for p in positions_to_close:
+            #         p[0]['btc_amount'] *= scale_factor
+            #     total_btc_to_sell = self.btc_held     
+
+            # Check for new entry
+            new_position_btc = 0
+            position_size_factor = 0
+            
+            # Check entry condition based on direction
+            entry_signal = False
+            if self.config.entry_direction == "above":
+                entry_signal = current_feature > self.config.entry_threshold
+            else:  # below
+                entry_signal = current_feature < self.config.entry_threshold
+            
+            # Determine position direction based on trading mode
+            position_direction = 1  # Default to long
+            if self.config.trading_mode == "short_only":
+                position_direction = -1
+            elif self.config.trading_mode == "long_only":
+                position_direction = 1
+
+            
+            if entry_signal:
+                position_size_factor = self.position_manager.calculate_position_size_factor(current_feature)
+                if position_size_factor > 0:
+                    # Use conservative equity for position sizing (no unrealized gains)
+                    available_equity = self._calculate_available_equity_for_sizing(current_price)
+                    position_size_usd = available_equity * self.config.base_position_size * position_size_factor
+                    # Apply leverage if configured
+                    position_size_usd *= self.config.leverage_multiplier
+                    new_position_btc = position_size_usd / current_price if current_price > 0 else 0
+                    
+                    # Debug logging for position sizing
+                    if i % 100 == 0:  # Log every 100th calculation
+                        true_equity = self._calculate_true_equity(current_price)
+                        self.debug_log.append(f"Position sizing debug at {current_time}:")
+                        self.debug_log.append(f"  Cash: {self.cash}")
+                        self.debug_log.append(f"  BTC borrowed: {self.btc_borrowed}")
+                        self.debug_log.append(f"  Current price: {current_price}")
+                        self.debug_log.append(f"  True equity: {true_equity}")
+                        self.debug_log.append(f"  Available equity (conservative): {available_equity}")
+                        self.debug_log.append(f"  Position size factor: {position_size_factor}")
+                        self.debug_log.append(f"  Position size USD: {position_size_usd}")
+                        self.debug_log.append(f"  New position BTC: {new_position_btc}")
+            
+            # Apply borrowing costs for short positions
+            # if self.btc_borrowed > 0:
+            #     self._apply_borrowing_costs(current_time)
+            
+            # Execute trades
+            self._execute_trades(i, positions_to_close, new_position_btc, position_size_factor, position_direction)
+            
+            # Update position tracking
+            self.position_manager.close_positions(positions_to_close)
+            
+            # Record portfolio state
+            self._record_portfolio_state(i)
+        
+        print("Backtest completed.")
+        
+        # Save debug log
+        if not os.path.exists(self.config.output_dir):
+            os.makedirs(self.config.output_dir)
+        debug_file = os.path.join(self.config.output_dir, f"{self.config.output_prefix}_debug_log.txt")
+        with open(debug_file, 'w') as f:
+            f.write('\n'.join(self.debug_log))
+        
+        return pd.DataFrame(self.trades), pd.DataFrame(self.portfolio_history)
+    
+    def _execute_trades(self, index: int, positions_to_close: List[Tuple[Dict, str]], 
+                       new_position_btc: float, position_size_factor: float, position_direction: int):
+        """Execute buy/sell trades with net position readjustment logic"""
+        current_time = self.data.iloc[index]['timestamp']
+        current_price = self.data.iloc[index][self.price_col]
+        current_feature = self.data.iloc[index][self.feature_col]
+        
+        # Calculate current portfolio value before trades
+        portfolio_value = self._calculate_portfolio_value(current_price)
+        
+        # Log trade execution
+        self.debug_log.append(f"\nTrade execution at {current_time}:")
+        self.debug_log.append(f"Portfolio value before: {portfolio_value}")
+        self.debug_log.append(f"Cash before: {self.cash}")
+        self.debug_log.append(f"BTC held before: {self.btc_held}")
+        self.debug_log.append(f"BTC borrowed before: {self.btc_borrowed}")
+        
+        # --- Execute position closures first ---
+        total_long_closes = 0
+        total_short_closes = 0
+        
+        for pos, reason in positions_to_close:
+            btc_amount = pos['btc_amount']
+            pos_direction = pos.get('direction', 1)
+            
+            if btc_amount > 0:
+                if pos_direction == 1:  # Closing long position
+                    # Sell BTC
+                    transaction_cost = btc_amount * current_price * self.config.transaction_cost
+                    proceeds = btc_amount * current_price - transaction_cost
+                    self.cash += proceeds
+                    self.btc_held -= btc_amount
+                    total_long_closes += btc_amount
+                    
+                else:  # Closing short position (direction == -1)
+                    # Buy BTC to cover
+                    cost_to_cover = btc_amount * current_price
+                    transaction_cost = cost_to_cover * self.config.transaction_cost
+                    total_cost = cost_to_cover + transaction_cost
+                    
+                    if total_cost > self.cash:
+                        # Can't afford full cover, scale down
+                        affordable_amount = self.cash / (current_price * (1 + self.config.transaction_cost))
+                        btc_amount = min(btc_amount, affordable_amount)
+                        cost_to_cover = btc_amount * current_price
+                        transaction_cost = cost_to_cover * self.config.transaction_cost
+                        total_cost = cost_to_cover + transaction_cost
+                    
+                    self.cash -= total_cost
+                    self.btc_borrowed -= btc_amount
+                    total_short_closes += btc_amount
+        
+        # --- Execute new position opening ---
+        if new_position_btc > 1e-9:
+            if position_direction == 1:  # Opening long position
+                required_cash = new_position_btc * current_price * (1 + self.config.transaction_cost)
+                
+                if required_cash > self.cash:
+                    # Adjust size if insufficient cash
+                    if self.cash > 0:
+                        new_position_btc = self.cash / (current_price * (1 + self.config.transaction_cost))
+                    else:
+                        new_position_btc = 0
+                
+                if new_position_btc > 1e-9:
+                    transaction_cost = new_position_btc * current_price * self.config.transaction_cost
+                    self.cash -= (new_position_btc * current_price + transaction_cost)
+                    self.btc_held += new_position_btc
+                    
+            else:  # Opening short position (direction == -1)
+                # For shorts, we don't need additional collateral checks since position sizing
+                # is already based on true equity, not inflated portfolio value
+                if new_position_btc > 1e-9:
+                    transaction_cost = new_position_btc * current_price * self.config.transaction_cost
+                    proceeds_from_short = new_position_btc * current_price - transaction_cost
+                    self.cash += proceeds_from_short
+                    self.btc_borrowed += new_position_btc
+        
+        # --- Determine trade types for logging ---
+        if total_long_closes > 0 and total_short_closes > 0:
+            trade_type = "MIXED_CLOSE"
+        elif total_long_closes > 0:
+            trade_type = "SELL" if new_position_btc < 1e-9 else "NET_SELL"
+        elif total_short_closes > 0:
+            trade_type = "COVER" if new_position_btc < 1e-9 else "NET_COVER"
+        elif new_position_btc > 1e-9:
+            trade_type = "SHORT" if position_direction == -1 else "BUY"
+        else:
+            trade_type = "NO_TRADE"
+        
+        # --- Calculate closed position details for logging ---
+        closed_positions_details = []
+        for pos, reason in positions_to_close:
+            btc_amount = pos['btc_amount']
+            pos_direction = pos.get('direction', 1)
+            
+            if btc_amount > 0:
+                # Calculate profit/loss based on position direction
+                if pos_direction == 1:  # Long position
+                    profit_loss_pct = (current_price - pos['entry_price']) / pos['entry_price'] if pos['entry_price'] > 0 else 0
+                    profit_loss_usd = btc_amount * (current_price - pos['entry_price'])
+                else:  # Short position (direction == -1)
+                    profit_loss_pct = (pos['entry_price'] - current_price) / pos['entry_price'] if pos['entry_price'] > 0 else 0
+                    profit_loss_usd = btc_amount * (pos['entry_price'] - current_price)
+                
+                hold_time_hours = (current_time - pos['entry_time']).total_seconds() / 3600
+                
+                closed_positions_details.append({
+                    'id': pos['id'],
+                    'entry_time': pos['entry_time'],
+                    'entry_price': pos['entry_price'],
+                    'entry_feature': pos['entry_feature'],
+                    'btc_amount': btc_amount,
+                    'direction': pos_direction,
+                    'profit_loss_pct': profit_loss_pct,
+                    'profit_loss_usd': profit_loss_usd,
+                    'hold_time_hours': hold_time_hours,
+                    'exit_reason': reason,
+                    'size_factor': pos['size_factor']
+                })
+        
+        # --- Create readjustment notes ---
+        readjustment_note = None
+        if positions_to_close and new_position_btc > 1e-9:
+            closed_info_str = ", ".join([
+                f"ID {c['id']} ({c['exit_reason']}, {'+' if c['profit_loss_usd'] >= 0 else ''}"
+                f"${c['profit_loss_usd']:.2f})"
+                for c in closed_positions_details
+            ])
+            open_type = "SHORT" if position_direction == -1 else "LONG"
+            readjustment_note = f"Readjustment: Closing {closed_info_str}; Opening new {open_type} position: {new_position_btc:.8f} BTC"
+        elif positions_to_close:
+            closed_info_str = ", ".join([
+                f"ID {c['id']} ({c['exit_reason']}, {'+' if c['profit_loss_usd'] >= 0 else ''}"
+                f"${c['profit_loss_usd']:.2f})"
+                for c in closed_positions_details
+            ])
+            readjustment_note = f"Closing {closed_info_str}"
+        elif new_position_btc > 1e-9:
+            open_type = "SHORT" if position_direction == -1 else "LONG"
+            readjustment_note = f"Opening new {open_type} position: {new_position_btc:.8f} BTC"
+        
+        # Ensure non-negative balances
+        self.cash = max(0, self.cash)
+        self.btc_held = max(0, self.btc_held)
+        self.btc_borrowed = max(0, self.btc_borrowed)
+        
+        # --- Log Trades ---
+        # Log new position opening
+        if new_position_btc > 1e-9:
+            position = self.position_manager.open_position(
+                current_time, current_price, current_feature, new_position_btc, position_size_factor, position_direction
+            )
+            
+            # Determine trade type and transaction cost
+            if position_direction == 1:
+                log_trade_type = "BUY"
+                transaction_cost = new_position_btc * current_price * self.config.transaction_cost
+            else:
+                log_trade_type = "SHORT" 
+                transaction_cost = new_position_btc * current_price * self.config.transaction_cost
+            
+            self.trades.append({
+                'timestamp': current_time,
+                'price': current_price,
+                'trade_type': log_trade_type,
+                'trade_id': position['id'],
+                'btc_amount': new_position_btc,
+                'usd_amount': new_position_btc * current_price,
+                'portfolio_value': portfolio_value,
+                'cash': self.cash,
+                'btc_held': self.btc_held,
+                'btc_borrowed': self.btc_borrowed,
+                'position_direction': position_direction,
+                'feature_value': current_feature,
+                'size_factor': position_size_factor,
+                'transaction_cost': transaction_cost,
+                'entry_time': None,
+                'entry_price': None,
+                'entry_feature': None,
+                'profit_loss_pct': None,
+                'profit_loss_usd': None,
+                'hold_time_hours': None,
+                'exit_reason': None,
+                'readjustment_note': readjustment_note if len(closed_positions_details) == 1 else None
+            })
+        
+        # Log position closures
+        for closed_info in closed_positions_details:
+            position_dir = closed_info['direction']
+            
+            # Determine trade type and transaction cost
+            if position_dir == 1:
+                log_trade_type = "SELL"
+                transaction_cost = closed_info['btc_amount'] * current_price * self.config.transaction_cost
+            else:
+                log_trade_type = "COVER"
+                transaction_cost = closed_info['btc_amount'] * current_price * self.config.transaction_cost
+            
+            self.trades.append({
+                'timestamp': current_time,
+                'price': current_price,
+                'trade_type': log_trade_type,
+                'trade_id': closed_info['id'],
+                'btc_amount': closed_info['btc_amount'],
+                'usd_amount': closed_info['btc_amount'] * current_price,
+                'portfolio_value': portfolio_value,
+                'cash': self.cash,
+                'btc_held': self.btc_held,
+                'btc_borrowed': self.btc_borrowed,
+                'position_direction': position_dir,
+                'feature_value': current_feature,
+                'size_factor': closed_info['size_factor'],
+                'transaction_cost': transaction_cost,
+                'entry_time': closed_info['entry_time'],
+                'entry_price': closed_info['entry_price'],
+                'entry_feature': closed_info['entry_feature'],
+                'profit_loss_pct': closed_info['profit_loss_pct'],
+                'profit_loss_usd': closed_info['profit_loss_usd'],
+                'hold_time_hours': closed_info['hold_time_hours'],
+                'exit_reason': closed_info['exit_reason'],
+                'readjustment_note': readjustment_note if len(closed_positions_details) == 1 else None
+            })
+        
+        # Update position tracking - remove closed positions from manager
+        self.position_manager.close_positions(positions_to_close)
+    
+    def _calculate_true_equity(self, current_price: float) -> float:
+        """Calculate true equity (not inflated by short sale proceeds)"""
+        # True equity = What we'd have if we closed all positions right now
+        # This equals: cash + long_value - short_liability
+        equity = self.cash
+        equity += self.btc_held * current_price  # Long positions value
+        equity -= self.btc_borrowed * current_price  # Short positions liability
+        
+        return max(0, equity)  # Can't have negative equity
+    
+    def _calculate_portfolio_value(self, current_price: float) -> float:
+        """Calculate portfolio value including long and short positions"""
+        # Start with cash (which includes proceeds from short sales)
+        portfolio_value = self.cash
+        
+        # Add value of long positions
+        portfolio_value += self.btc_held * current_price
+        
+        # Subtract liability from short positions (BTC we owe at current price)
+        # This is the cost to cover all borrowed BTC at current market price
+        if self.btc_borrowed > 0:
+            short_liability = self.btc_borrowed * current_price
+            portfolio_value -= short_liability
+        
+        return portfolio_value
+    
+    def _apply_borrowing_costs(self, current_time: datetime):
+        """Apply hourly borrowing costs to short positions"""
+        if self.btc_borrowed <= 0:
+            return
+            
+        if self.last_borrowing_cost_time is None:
+            self.last_borrowing_cost_time = current_time
+            return
+        
+        # Calculate hours since last borrowing cost application
+        hours_elapsed = (current_time - self.last_borrowing_cost_time).total_seconds() / 3600
+        
+        if hours_elapsed >= 1.0:  # Apply costs every hour
+            # Calculate borrowing cost in USD
+            # Use current BTC price to convert borrowing rate to USD
+            current_price = self.data[self.data['timestamp'] == current_time][self.price_col].iloc[0]
+            borrowing_cost_btc = self.btc_borrowed * self.borrowing_rate_hourly * hours_elapsed
+            borrowing_cost_usd = borrowing_cost_btc * current_price
+            
+            # Deduct borrowing cost from cash
+            self.cash -= borrowing_cost_usd
+            
+            # Log borrowing cost (optional, for tracking)
+            self.debug_log.append(f"Borrowing cost applied: {borrowing_cost_usd:.4f} USD for {self.btc_borrowed:.6f} BTC over {hours_elapsed:.2f} hours")
+            
+            self.last_borrowing_cost_time = current_time
+    
+    def _record_portfolio_state(self, index: int):
+        """Record current portfolio state"""
+        current_time = self.data.iloc[index]['timestamp']
+        current_price = self.data.iloc[index][self.price_col]
+        current_feature = self.data.iloc[index][self.feature_col]
+        
+        portfolio_value = self._calculate_portfolio_value(current_price)
+        btc_value = self.btc_held * current_price
+        btc_allocation = (btc_value / portfolio_value) * 100 if portfolio_value > 0 else 0
+        
+        # Calculate short position metrics
+        short_value = 0
+        short_allocation = 0
+        if self.btc_borrowed > 0:
+            # For shorts, the "value" is the unrealized P&L impact
+            short_positions = [pos for pos in self.position_manager.positions if pos.get('direction', 1) == -1]
+            if short_positions:
+                total_borrowed_value = sum(pos['btc_amount'] * pos['entry_price'] for pos in short_positions)
+                weighted_avg_short_entry = total_borrowed_value / self.btc_borrowed if self.btc_borrowed > 0 else 0
+                short_pnl = self.btc_borrowed * (weighted_avg_short_entry - current_price)
+                short_value = abs(self.btc_borrowed * current_price)  # Notional value of short position
+                short_allocation = (short_value / portfolio_value) * 100 if portfolio_value > 0 else 0
+        
+        self.portfolio_history.append({
+            'timestamp': current_time,
+            'portfolio_value': portfolio_value,
+            'cash': self.cash,
+            'btc_held': self.btc_held,
+            'btc_borrowed': self.btc_borrowed,
+            'btc_value': btc_value,
+            'short_value': short_value,
+            'btc_allocation': btc_allocation,
+            'short_allocation': short_allocation,
+            'feature_value': current_feature,
+            'price': current_price
+        })
+
+    def _calculate_available_equity_for_sizing(self, current_price: float) -> float:
+        """
+        Calculate equity available for position sizing.
+        Simple approach: limit total notional exposure to prevent excessive leverage
+        """
+        # Calculate current notional exposure from short positions
+        current_short_exposure = self.btc_borrowed * current_price
+        
+        # Maximum allowed total exposure (e.g., 2x initial capital for conservative leverage)
+        max_total_exposure = self.config.initial_portfolio * self.config.leverage_multiplier
+        
+        # Available equity = initial capital if under exposure limit
+        if current_short_exposure < max_total_exposure:
+            # Still have room for more positions
+            remaining_exposure_capacity = max_total_exposure - current_short_exposure
+            available_equity = min(self.config.initial_portfolio, remaining_exposure_capacity)
+        else:
+            # Already at or over exposure limit - no new positions
+            available_equity = self.config.initial_portfolio * 0.1  # Minimal amount
+        
+        return max(self.config.initial_portfolio * 0.1, available_equity)
+
+
+class PerformanceAnalyzer:
+    """Analyzes backtest performance metrics"""
+    
+    def __init__(self, config: BacktestConfig):
+        self.config = config
+    
+    def calculate_metrics(self, trades_df: pd.DataFrame, portfolio_df: pd.DataFrame) -> Dict:
+        """Calculate all performance metrics"""
+        if portfolio_df.empty or len(portfolio_df) < 2:
+            return {}
+        
+        metrics = {}
+        
+        # Basic returns
+        initial_value = self.config.initial_portfolio
+        final_value = portfolio_df['portfolio_value'].iloc[-1]
+        metrics['total_return'] = (final_value - initial_value) / initial_value
+        metrics['total_return_pct'] = metrics['total_return'] * 100
+        
+        # Time-based returns
+        start_date = portfolio_df['timestamp'].iloc[0]
+        end_date = portfolio_df['timestamp'].iloc[-1]
+        years = max(1.0, (end_date - start_date).days) / 365.25
+        metrics['annualized_return'] = ((1 + metrics['total_return']) ** (1 / years)) - 1 if metrics['total_return'] > -1 else -1
+        metrics['annualized_return_pct'] = metrics['annualized_return'] * 100
+        
+        # Sharpe ratio
+        metrics['sharpe_ratio'] = self._calculate_sharpe_ratio(portfolio_df)
+        
+        # Drawdown
+        portfolio_df['drawdown'] = 1 - portfolio_df['portfolio_value'] / portfolio_df['portfolio_value'].cummax()
+        metrics['max_drawdown'] = portfolio_df['drawdown'].max()
+        metrics['max_drawdown_pct'] = metrics['max_drawdown'] * 100
+        
+        # Trade analysis
+        if not trades_df.empty:
+            # Include both long and short closing trades
+            sell_trades = trades_df[trades_df['trade_type'].isin(['SELL', 'NET_SELL', 'EXACT_BALANCE', 'COVER', 'NET_COVER'])].dropna(subset=['profit_loss_pct'])
+            
+            if not sell_trades.empty:
+                metrics['total_trades'] = len(sell_trades)
+                metrics['win_count'] = len(sell_trades[sell_trades['profit_loss_pct'] > 0])
+                metrics['win_rate'] = metrics['win_count'] / metrics['total_trades'] * 100
+                
+                # Calculate profit factor
+                sell_trades_pnl = sell_trades.dropna(subset=['profit_loss_usd'])
+                if not sell_trades_pnl.empty:
+                    profits = sell_trades_pnl[sell_trades_pnl['profit_loss_usd'] > 0]['profit_loss_usd'].sum()
+                    losses = abs(sell_trades_pnl[sell_trades_pnl['profit_loss_usd'] < 0]['profit_loss_usd'].sum())
+                    metrics['profit_factor'] = profits / losses if losses > 0 else (profits if profits > 0 else 0)
+                else:
+                    metrics['profit_factor'] = 0
+                
+                # Exit reason analysis
+                exit_counts = sell_trades['exit_reason'].value_counts()
+                metrics['time_limit_exits'] = exit_counts.get('TIME_LIMIT', 0)
+                metrics['feature_exits'] = exit_counts.get('FEATURE_EXIT', 0)
+                metrics['stop_loss_exits'] = exit_counts.get('STOP_LOSS', 0)
+                metrics['take_profit_exits'] = exit_counts.get('TAKE_PROFIT', 0)
+                
+                # Count combined exit reasons (e.g., "TIME_LIMIT+STOP_LOSS")
+                combined_exits = 0
+                for reason in exit_counts.index:
+                    if '+' in str(reason):
+                        combined_exits += exit_counts[reason]
+                metrics['combined_exits'] = combined_exits
+                
+                # Trade type analysis
+                long_trades = sell_trades[sell_trades['trade_type'].isin(['SELL', 'NET_SELL'])]
+                short_trades = sell_trades[sell_trades['trade_type'].isin(['COVER', 'NET_COVER'])]
+                
+                metrics['long_trades'] = len(long_trades)
+                metrics['short_trades'] = len(short_trades)
+                
+                if len(long_trades) > 0:
+                    metrics['long_win_rate'] = len(long_trades[long_trades['profit_loss_pct'] > 0]) / len(long_trades) * 100
+                    metrics['long_avg_return'] = long_trades['profit_loss_pct'].mean() * 100
+                else:
+                    metrics['long_win_rate'] = 0
+                    metrics['long_avg_return'] = 0
+                    
+                if len(short_trades) > 0:
+                    metrics['short_win_rate'] = len(short_trades[short_trades['profit_loss_pct'] > 0]) / len(short_trades) * 100
+                    metrics['short_avg_return'] = short_trades['profit_loss_pct'].mean() * 100
+            else:
+                metrics['total_trades'] = 0
+                metrics['win_rate'] = 0
+        
+        # Portfolio allocation
+        metrics['mean_btc_allocation'] = portfolio_df['btc_allocation'].mean()
+        metrics['max_btc_allocation'] = portfolio_df['btc_allocation'].max()
+        
+        # Transaction costs and volume analysis
+        if not trades_df.empty:
+            metrics['total_transaction_cost'] = trades_df['transaction_cost'].sum()
+            metrics['total_buy_amount'] = trades_df[trades_df['trade_type'].isin(['BUY', 'NET_BUY'])]['usd_amount'].sum()
+            metrics['total_sell_amount'] = trades_df[trades_df['trade_type'].isin(['SELL', 'NET_SELL'])]['usd_amount'].sum()
+        else:
+            metrics['total_transaction_cost'] = 0
+            metrics['total_buy_amount'] = 0
+            metrics['total_sell_amount'] = 0
+        
+        # Backtest period
+        metrics['start_date'] = start_date
+        metrics['end_date'] = end_date
+        metrics['duration_days'] = (end_date - start_date).days
+        
+        return metrics
+    
+    def _calculate_sharpe_ratio(self, portfolio_df: pd.DataFrame) -> float:
+        """Calculate Sharpe ratio using weekly returns"""
+        # Group by week
+        portfolio_df['week'] = portfolio_df['timestamp'].dt.isocalendar().week
+        portfolio_df['year'] = portfolio_df['timestamp'].dt.isocalendar().year
+        
+        weekly_portfolio = portfolio_df.groupby(['year', 'week'])['portfolio_value'].last().reset_index()
+        
+        if len(weekly_portfolio) > 1:
+            weekly_portfolio['return'] = weekly_portfolio['portfolio_value'].pct_change()
+            weekly_returns = weekly_portfolio['return'].dropna()
+            
+            if weekly_returns.std() != 0 and not np.isnan(weekly_returns.std()):
+                excess_returns = weekly_returns - (self.config.risk_free_rate / 52)
+                return np.sqrt(52) * excess_returns.mean() / excess_returns.std()
+        
+        return 0.0
+    
+    def generate_summary(self, metrics: Dict) -> str:
+        """Generate performance summary text"""
+        summary = f"""
+        =======================================================================
+        PERFORMANCE SUMMARY - {self.config.output_prefix}
+        =======================================================================
+
+        Strategy Parameters:
+        - Trading Mode: {self.config.trading_mode.upper()}
+        - Feature Type: {self.config.feature_type}
+        - Feature Lag Periods: {self.config.feature_lag_periods}
+        - Entry Threshold: {self.config.entry_threshold} ({self.config.entry_direction})
+        - Exit Threshold: {self.config.exit_threshold} ({self.config.exit_direction})
+        - Max Hold Hours: {self.config.max_hold_hours}
+        - Base Position Size: {self.config.base_position_size * 100:.2f}%
+        - Leverage: {self.config.leverage_multiplier:.1f}x
+        - Transaction Cost: {self.config.transaction_cost * 100:.3f}%
+        {"- Borrowing Rate: " + f"{self.config.borrowing_rate_annual * 100:.2f}%" + " annual" if self.config.trading_mode == "short_only" else ""}
+        - Stop Loss: {'Enabled' if self.config.stop_loss_enabled else 'Disabled'} ({self.config.stop_loss_percentage * 100:.1f}% if enabled)
+        - Take Profit: {'Enabled' if self.config.take_profit_enabled else 'Disabled'} ({self.config.take_profit_percentage * 100:.1f}% if enabled)
+
+        Performance Metrics:
+        - Initial Portfolio Value: ${self.config.initial_portfolio:,.2f}
+        - Final Portfolio Value: ${self.config.initial_portfolio * (1 + metrics.get('total_return', 0)):,.2f}
+        - Total Return: {metrics.get('total_return_pct', 0):.2f}%
+        - Annualized Return: {metrics.get('annualized_return_pct', 0):.2f}%
+        - Sharpe Ratio: {metrics.get('sharpe_ratio', 0):.2f}
+        - Maximum Drawdown: {metrics.get('max_drawdown_pct', 0):.2f}%
+
+        Trade Analysis:
+        - Number of Trades: {metrics.get('total_trades', 0)}
+        - Win Rate: {metrics.get('win_rate', 0):.2f}%
+        {"- Long Trades: " + f"{metrics.get('long_trades', 0)}" + f" (Win Rate: {metrics.get('long_win_rate', 0):.1f}%)" if metrics.get('long_trades', 0) > 0 else ""}
+        {"- Short Trades: " + f"{metrics.get('short_trades', 0)}" + f" (Win Rate: {metrics.get('short_win_rate', 0):.1f}%)" if metrics.get('short_trades', 0) > 0 else ""}
+        - Mean Hold Time: {metrics.get('mean_hold_time', 0):.2f} hours
+        - Median Hold Time: {metrics.get('median_hold_time', 0):.2f} hours
+
+        Exit Analysis:
+        - Time Limit Exits: {metrics.get('time_limit_exits', 0)} ({metrics.get('time_limit_pct', 0):.2f}%)
+        - Feature Exit ({self.config.feature_type.upper()} {self.config.exit_direction} {self.config.exit_threshold}): {metrics.get('feature_exits', 0)} ({metrics.get('feature_exit_pct', 0):.2f}%)
+        - Time Limit Exit Win Rate: {metrics.get('time_limit_win_rate', 0):.2f}%
+        - Feature Exit Win Rate: {metrics.get('feature_exit_win_rate', 0):.2f}%
+        - Stop Loss Exits: {metrics.get('stop_loss_exits', 0)} ({metrics.get('stop_loss_pct', 0):.2f}%)
+        - Stop Loss Win Rate: {metrics.get('stop_loss_win_rate', 0):.2f}%
+        - Take Profit Exits: {metrics.get('take_profit_exits', 0)} ({metrics.get('take_profit_pct', 0):.2f}%)
+        - Take Profit Win Rate: {metrics.get('take_profit_win_rate', 0):.2f}%
+
+        Signal Strength Analysis:
+        - MODERATE Win Rate: {metrics.get('moderate_win_rate', 0):.2f}%
+        - STRONG Win Rate: {metrics.get('strong_win_rate', 0):.2f}%
+
+        Position Sizing Analysis:
+        - Mean Position Size Factor: {metrics.get('mean_position_factor', 0):.2f}x
+        - Median Position Size Factor: {metrics.get('median_position_factor', 0):.2f}x
+        - Mean BTC Allocation: {metrics.get('mean_btc_allocation', 0):.2f}%
+        - Maximum BTC Allocation: {metrics.get('max_btc_allocation', 0):.2f}%
+
+        Cost Analysis:
+        - Total Transaction Cost: ${metrics.get('total_transaction_cost', 0):,.2f}
+        - Total Buy Amount: ${metrics.get('total_buy_amount', 0):,.2f}
+        - Total Sell Amount: ${metrics.get('total_sell_amount', 0):,.2f}
+
+        Backtest Period:
+        - Start Date: {metrics.get('start_date', 'N/A')}
+        - End Date: {metrics.get('end_date', 'N/A')}
+        - Duration: {metrics.get('duration_days', 0)} days
+
+        =======================================================================
+        """
+        return summary
+
+
+class Plotter:
+    """Creates backtest visualizations"""
+    
+    def __init__(self, config: BacktestConfig):
+        self.config = config
+    
+    def create_all_charts(self, trades_df: pd.DataFrame, portfolio_df: pd.DataFrame):
+        """Generate all visualization charts"""
+        output_dir = self.config.output_dir
+        prefix = self.config.output_prefix
+        
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        
+        print("Generating visualizations...")
+        
+        # 1. Portfolio value chart (with benchmark)
+        self._plot_portfolio_value_with_benchmark(portfolio_df, trades_df, output_dir, prefix)
+        
+        # 2. Portfolio value chart (without benchmark)
+        self._plot_portfolio_value(portfolio_df, output_dir, prefix)
+        
+        # 3. BTC allocation chart
+        self._plot_btc_allocation(portfolio_df, output_dir, prefix)
+        
+        # 4. Drawdown chart
+        self._plot_drawdown(portfolio_df, output_dir, prefix)
+        
+        # 5. Trade distribution charts
+        if not trades_df.empty:
+            self._plot_win_rate_by_exit(trades_df, output_dir, prefix)
+            self._plot_position_size_distribution(trades_df, output_dir, prefix)
+            self._plot_hold_time_distribution(trades_df, output_dir, prefix)
+            self._plot_profit_loss_distribution(trades_df, output_dir, prefix)
+            self._plot_position_size_vs_feature(trades_df, output_dir, prefix)
+            self._plot_entry_distribution(trades_df, output_dir, prefix)
+        
+        # 6. Cash utilization chart
+        self._plot_cash_utilization(portfolio_df, output_dir, prefix)
+        
+        # 7. Combined performance chart (Strategy + BTC + Combined)
+        self._plot_combined_performance_chart(portfolio_df, output_dir, prefix)
+        
+        print(f"Visualizations saved to {output_dir}")
+    
+    def _plot_portfolio_value_with_benchmark(self, portfolio_df: pd.DataFrame, trades_df: pd.DataFrame, 
+                                           output_dir: str, prefix: str):
+        """Plot portfolio value with buy & hold benchmark"""
+        fig, ax = plt.subplots(figsize=(12, 6))
+        
+        # Strategy performance
+        ax.plot(portfolio_df['timestamp'], portfolio_df['portfolio_value'] / 1000, 
+                linewidth=2, color='blue', label='Strategy')
+        
+        # Buy and Hold benchmark
+        if not trades_df.empty and 'price' in trades_df.columns:
+            initial_price = trades_df['price'].iloc[0]
+        else:
+            initial_price = portfolio_df['price'].iloc[0] if 'price' in portfolio_df.columns else 1
+        
+        initial_btc_amount = self.config.initial_portfolio / initial_price
+        portfolio_df['benchmark_value'] = portfolio_df['price'] * initial_btc_amount
+        
+        ax.plot(portfolio_df['timestamp'], portfolio_df['benchmark_value'] / 1000, 
+                linewidth=2, color='green', linestyle='--', label='Buy & Hold')
+        
+        ax.set_title(f'Portfolio Value Over Time - {prefix}')
+        ax.set_ylabel('Portfolio Value ($K)')
+        ax.set_xlabel('Date')
+        ax.legend()
+        ax.grid(True)
+        
+        # Format y-axis
+        ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'${x:.0f}K'))
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, f'{prefix}_portfolio_value_chart.png'), dpi=300)
+        plt.close()
+    
+    def _plot_portfolio_value(self, portfolio_df: pd.DataFrame, output_dir: str, prefix: str):
+        """Plot portfolio value over time (without benchmark)"""
+        fig, ax = plt.subplots(figsize=(12, 6))
+        
+        ax.plot(portfolio_df['timestamp'], portfolio_df['portfolio_value'] / 1000, 
+                linewidth=2, color='blue')
+        
+        ax.set_title(f'Portfolio Value Over Time - {prefix}')
+        ax.set_ylabel('Portfolio Value ($K)')
+        ax.set_xlabel('Date')
+        ax.grid(True)
+        
+        # Format y-axis
+        ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'${x:.0f}K'))
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, f'{prefix}_portfolio_value_chart_no_benchmark.png'), dpi=300)
+        plt.close()
+    
+    def _plot_btc_allocation(self, portfolio_df: pd.DataFrame, output_dir: str, prefix: str):
+        """Plot BTC allocation percentage over time"""
+        fig, ax = plt.subplots(figsize=(12, 6))
+        
+        ax.plot(portfolio_df['timestamp'], portfolio_df['btc_allocation'], 
+                linewidth=2, color='orange')
+        ax.fill_between(portfolio_df['timestamp'], 0, portfolio_df['btc_allocation'], 
+                       alpha=0.3, color='orange')
+        
+        ax.set_title(f'BTC Allocation Over Time - {prefix}')
+        ax.set_ylabel('BTC Allocation (%)')
+        ax.set_xlabel('Date')
+        ax.set_ylim(0, 100)
+        ax.grid(True)
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, f'{prefix}_btc_allocation.png'), dpi=300)
+        plt.close()
+    
+    def _plot_drawdown(self, portfolio_df: pd.DataFrame, output_dir: str, prefix: str):
+        """Plot drawdown chart"""
+        portfolio_df['drawdown'] = 1 - portfolio_df['portfolio_value'] / portfolio_df['portfolio_value'].cummax()
+        
+        fig, ax = plt.subplots(figsize=(12, 6))
+        
+        ax.fill_between(portfolio_df['timestamp'], 0, portfolio_df['drawdown'] * 100, 
+                       color='red', alpha=0.3)
+        ax.plot(portfolio_df['timestamp'], portfolio_df['drawdown'] * 100, 
+                color='red', linewidth=2)
+        
+        ax.set_title(f'Drawdown Chart - {prefix}')
+        ax.set_ylabel('Drawdown (%)')
+        ax.set_xlabel('Date')
+        ax.grid(True)
+        
+        # Invert y-axis so drawdowns appear as negative
+        ax.invert_yaxis()
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, f'{prefix}_drawdown_chart.png'), dpi=300)
+        plt.close()
+    
+    def _plot_win_rate_by_exit(self, trades_df: pd.DataFrame, output_dir: str, prefix: str):
+        """Plot win rate by exit reason"""
+        sell_trades = trades_df[trades_df['trade_type'].isin(['SELL', 'NET_SELL', 'EXACT_BALANCE', 'COVER', 'NET_COVER'])].dropna(subset=['profit_loss_pct', 'exit_reason'])
+        
+        if sell_trades.empty:
+            return
+        
+        # Calculate win rates for each exit reason
+        exit_stats = {}
+        for reason in sell_trades['exit_reason'].unique():
+            reason_trades = sell_trades[sell_trades['exit_reason'] == reason]
+            wins = len(reason_trades[reason_trades['profit_loss_pct'] > 0])
+            total = len(reason_trades)
+            win_rate = wins / total * 100 if total > 0 else 0
+            exit_stats[reason] = {'win_rate': win_rate, 'count': total}
+        
+        # Sort by count for better visualization
+        sorted_reasons = sorted(exit_stats.keys(), key=lambda x: exit_stats[x]['count'], reverse=True)
+        
+        # Create bar chart
+        fig, ax = plt.subplots(figsize=(12, 6))
+        
+        win_rates = [exit_stats[r]['win_rate'] for r in sorted_reasons]
+        counts = [exit_stats[r]['count'] for r in sorted_reasons]
+        
+        # Use different colors for different exit types
+        colors = []
+        for reason in sorted_reasons:
+            if 'STOP_LOSS' in reason:
+                colors.append('red')
+            elif 'TAKE_PROFIT' in reason:
+                colors.append('green')
+            elif 'FEATURE_EXIT' in reason:
+                colors.append('blue')
+            elif 'TIME_LIMIT' in reason:
+                colors.append('orange')
+            elif '+' in reason:
+                colors.append('purple')  # Combined reasons
+            else:
+                colors.append('gray')
+        
+        bars = ax.bar(range(len(sorted_reasons)), win_rates, color=colors, alpha=0.7)
+        
+        # Add count labels
+        for i, (rate, count) in enumerate(zip(win_rates, counts)):
+            ax.text(i, rate + 2, f'{rate:.1f}%\n(n={count})', ha='center', fontsize=9)
+        
+        # Format x-axis labels
+        formatted_reasons = [r.replace('_', ' ').title() for r in sorted_reasons]
+        ax.set_xticks(range(len(sorted_reasons)))
+        ax.set_xticklabels(formatted_reasons, rotation=45, ha='right')
+        ax.set_title(f'Win Rate by Exit Reason - {prefix}')
+        ax.set_ylabel('Win Rate (%)')
+        ax.set_ylim(0, 100)
+        
+        # Add legend
+        legend_elements = [
+            plt.Rectangle((0,0),1,1, facecolor='red', alpha=0.7, label='Stop Loss'),
+            plt.Rectangle((0,0),1,1, facecolor='green', alpha=0.7, label='Take Profit'),
+            plt.Rectangle((0,0),1,1, facecolor='blue', alpha=0.7, label='Feature Exit'),
+            plt.Rectangle((0,0),1,1, facecolor='orange', alpha=0.7, label='Time Limit'),
+            plt.Rectangle((0,0),1,1, facecolor='purple', alpha=0.7, label='Combined')
+        ]
+        ax.legend(handles=legend_elements, loc='upper right')
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, f'{prefix}_exit_win_rate.png'), dpi=300)
+        plt.close()
+    
+    def _plot_position_size_distribution(self, trades_df: pd.DataFrame, output_dir: str, prefix: str):
+        """Plot position size factor distribution"""
+        sell_trades = trades_df[trades_df['trade_type'].isin(['SELL', 'NET_SELL', 'EXACT_BALANCE', 'COVER', 'NET_COVER'])].dropna(subset=['size_factor'])
+        
+        if sell_trades.empty:
+            return
+        
+        fig, ax = plt.subplots(figsize=(8, 6))
+        
+        ax.hist(sell_trades['size_factor'], bins=20, alpha=0.7, color='blue')
+        
+        # Add mean and median lines
+        mean_factor = sell_trades['size_factor'].mean()
+        median_factor = sell_trades['size_factor'].median()
+        ax.axvline(mean_factor, color='red', linestyle='--', linewidth=2, label=f'Mean: {mean_factor:.2f}x')
+        ax.axvline(median_factor, color='green', linestyle=':', linewidth=2, label=f'Median: {median_factor:.2f}x')
+        
+        ax.set_title(f'Position Size Factor Distribution - {prefix}')
+        ax.set_xlabel('Position Size Factor')
+        ax.set_ylabel('Number of Trades')
+        ax.legend()
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, f'{prefix}_position_size_factor_chart.png'), dpi=300)
+        plt.close()
+    
+    def _plot_hold_time_distribution(self, trades_df: pd.DataFrame, output_dir: str, prefix: str):
+        """Plot hold time distribution"""
+        sell_trades = trades_df[trades_df['trade_type'].isin(['SELL', 'NET_SELL', 'EXACT_BALANCE', 'COVER', 'NET_COVER'])].dropna(subset=['hold_time_hours'])
+        
+        if sell_trades.empty:
+            return
+        
+        fig, ax = plt.subplots(figsize=(8, 6))
+        
+        max_hold = self.config.max_hold_hours
+        bins = np.linspace(0, max_hold + 0.5, max_hold * 2 + 1)
+        ax.hist(sell_trades['hold_time_hours'], bins=bins, alpha=0.7, color='blue')
+        
+        # Add mean and median lines
+        mean_hold = sell_trades['hold_time_hours'].mean()
+        median_hold = sell_trades['hold_time_hours'].median()
+        ax.axvline(mean_hold, color='red', linestyle='--', linewidth=2, label=f'Mean: {mean_hold:.2f}h')
+        ax.axvline(median_hold, color='green', linestyle=':', linewidth=2, label=f'Median: {median_hold:.2f}h')
+        
+        ax.set_title(f'Hold Time Distribution - {prefix}')
+        ax.set_xlabel('Hold Time (hours)')
+        ax.set_ylabel('Number of Trades')
+        ax.legend()
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, f'{prefix}_hold_time_dist.png'), dpi=300)
+        plt.close()
+    
+    def _plot_profit_loss_distribution(self, trades_df: pd.DataFrame, output_dir: str, prefix: str):
+        """Plot profit/loss distribution"""
+        sell_trades = trades_df[trades_df['trade_type'].isin(['SELL', 'NET_SELL', 'EXACT_BALANCE', 'COVER', 'NET_COVER'])].dropna(subset=['profit_loss_pct'])
+        
+        if sell_trades.empty:
+            return
+        
+        fig, ax = plt.subplots(figsize=(8, 6))
+        
+        # Convert to percentage
+        pnl_pct = sell_trades['profit_loss_pct'] * 100
+        
+        ax.hist(pnl_pct, bins=50, alpha=0.7, color='blue')
+        
+        # Add zero line
+        ax.axvline(0, color='black', linestyle='-', linewidth=2)
+        
+        # Add mean and median lines
+        mean_pnl = pnl_pct.mean()
+        median_pnl = pnl_pct.median()
+        ax.axvline(mean_pnl, color='red', linestyle='--', linewidth=2, label=f'Mean: {mean_pnl:.2f}%')
+        ax.axvline(median_pnl, color='green', linestyle=':', linewidth=2, label=f'Median: {median_pnl:.2f}%')
+        
+        ax.set_title(f'Profit/Loss Distribution - {prefix}')
+        ax.set_xlabel('Profit/Loss (%)')
+        ax.set_ylabel('Number of Trades')
+        ax.legend()
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, f'{prefix}_pnl_dist.png'), dpi=300)
+        plt.close()
+    
+    def _plot_position_size_vs_feature(self, trades_df: pd.DataFrame, output_dir: str, prefix: str):
+        """Plot position size vs feature value"""
+        sell_trades = trades_df[trades_df['trade_type'].isin(['SELL', 'NET_SELL', 'EXACT_BALANCE', 'COVER', 'NET_COVER'])].dropna(subset=['entry_feature', 'size_factor'])
+        
+        if sell_trades.empty:
+            return
+        
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        # Create scatter plot
+        scatter = ax.scatter(sell_trades['entry_feature'], sell_trades['size_factor'],
+                           c=sell_trades['profit_loss_pct'] * 100, cmap='RdYlGn',
+                           alpha=0.7, s=30)
+        
+        # Add colorbar
+        cbar = plt.colorbar(scatter)
+        cbar.set_label('Profit/Loss (%)')
+        
+        # Add threshold lines
+        ax.axvline(self.config.entry_threshold, color='red', linestyle='--', linewidth=2,
+                  label=f'Entry Threshold: {self.config.entry_threshold}')
+        ax.axvline(self.config.sigmoid_midpoint, color='blue', linestyle=':', linewidth=2,
+                  label=f'Sigmoid Midpoint: {self.config.sigmoid_midpoint}')
+        
+        # Generate theoretical curve
+        x_values = np.linspace(self.config.entry_threshold, 
+                             max(sell_trades['entry_feature'].max(), self.config.sigmoid_midpoint * 2), 100)
+        position_manager = PositionManager(self.config)
+        y_values = [position_manager.calculate_position_size_factor(x) for x in x_values]
+        
+        ax.plot(x_values, y_values, 'k-', linewidth=2, label='Position Sizing Function')
+        
+        ax.set_title(f'Position Size vs {self.config.feature_type.upper()} Value - {prefix}')
+        ax.set_xlabel(f'{self.config.feature_type.upper()} Value')
+        ax.set_ylabel('Position Size Factor')
+        ax.legend()
+        ax.grid(True)
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, f'{prefix}_position_size_vs_{self.config.feature_type}_chart.png'), dpi=300)
+        plt.close()
+    
+    def _plot_cash_utilization(self, portfolio_df: pd.DataFrame, output_dir: str, prefix: str):
+        """Plot cash utilization over time"""
+        fig, ax = plt.subplots(figsize=(12, 6))
+        
+        # Calculate cash percentage
+        portfolio_df['cash_pct'] = portfolio_df['cash'] / portfolio_df['portfolio_value'] * 100
+        
+        ax.plot(portfolio_df['timestamp'], portfolio_df['cash_pct'], linewidth=2, color='blue')
+        ax.fill_between(portfolio_df['timestamp'], 0, portfolio_df['cash_pct'], alpha=0.3, color='blue')
+        
+        ax.set_title(f'Cash Utilization Over Time - {prefix}')
+        ax.set_ylabel('Cash Percentage (%)')
+        ax.set_xlabel('Date')
+        ax.set_ylim(0, 100)
+        ax.grid(True)
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, f'{prefix}_cash_utilization_chart.png'), dpi=300)
+        plt.close()
+    
+    def _plot_entry_distribution(self, trades_df: pd.DataFrame, output_dir: str, prefix: str):
+        """Plot feature distribution at entry points"""
+        buy_trades = trades_df[trades_df['trade_type'].isin(['BUY', 'NET_BUY'])].dropna(subset=['feature_value'])
+        
+        if buy_trades.empty:
+            return
+        
+        fig, ax = plt.subplots(figsize=(8, 6))
+        
+        # Create histogram
+        min_val = min(buy_trades['feature_value'].min(), self.config.entry_threshold * 0.5)
+        max_val = max(buy_trades['feature_value'].max(), self.config.sigmoid_midpoint * 2)
+        bins = np.linspace(min_val, max_val, 50)
+        ax.hist(buy_trades['feature_value'], bins=bins, alpha=0.7, color='blue')
+        
+        # Add vertical lines for thresholds
+        ax.axvline(self.config.entry_threshold, color='red', linestyle='--', linewidth=2,
+                  label=f'Entry Threshold: {self.config.entry_threshold}')
+        ax.axvline(self.config.sigmoid_midpoint, color='green', linestyle=':', linewidth=2,
+                  label=f'Sigmoid Midpoint: {self.config.sigmoid_midpoint}')
+        
+        ax.set_title(f'{self.config.feature_type.upper()} Distribution at Entry - {prefix}')
+        ax.set_xlabel(f'{self.config.feature_type.upper()} Value')
+        ax.set_ylabel('Number of Trades')
+        ax.legend()
+        ax.grid(True)
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, f'{prefix}_entry_distribution_chart.png'), dpi=300)
+        plt.close()
+    
+    def _plot_combined_performance_chart(self, portfolio_df: pd.DataFrame, output_dir: str, prefix: str):
+        """Plot combined performance chart showing Strategy, BTC, and Strategy+BTC combined performance"""
+        fig, ax = plt.subplots(figsize=(14, 8))
+        
+        # Calculate initial values
+        initial_portfolio_value = portfolio_df['portfolio_value'].iloc[0]
+        initial_btc_price = portfolio_df['price'].iloc[0]
+        
+        # Calculate normalized performance (percentage change from initial)
+        strategy_performance = (portfolio_df['portfolio_value'] / initial_portfolio_value - 1) * 100
+        btc_performance = (portfolio_df['price'] / initial_btc_price - 1) * 100
+        
+        # Calculate combined performance (sum of percentage changes)
+        combined_performance = strategy_performance + btc_performance
+        
+        # Plot all three lines
+        ax.plot(portfolio_df['timestamp'], strategy_performance, 
+                linewidth=2.5, color='blue', label='Our Strategy', alpha=0.8)
+        
+        ax.plot(portfolio_df['timestamp'], btc_performance, 
+                linewidth=2.5, color='orange', label='BTC Buy & Hold', alpha=0.8)
+        
+        ax.plot(portfolio_df['timestamp'], combined_performance, 
+                linewidth=3, color='red', label='Strategy + BTC Combined', alpha=0.9)
+        
+        # Add zero line for reference
+        ax.axhline(y=0, color='gray', linestyle='--', alpha=0.5, linewidth=1)
+        
+        # Formatting
+        ax.set_title(f'Combined Performance Analysis - {prefix}', fontsize=16, fontweight='bold')
+        ax.set_ylabel('Performance (%)', fontsize=14)
+        ax.set_xlabel('Date', fontsize=14)
+        ax.legend(fontsize=12, loc='upper left')
+        ax.grid(True, alpha=0.3)
+        
+        # Format y-axis to show percentages
+        ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.1f}%'))
+        
+        # Add some statistics as text box
+        final_strategy_perf = strategy_performance.iloc[-1]
+        final_btc_perf = btc_performance.iloc[-1]
+        final_combined_perf = combined_performance.iloc[-1]
+        
+        stats_text = f'''Final Performance:
+Strategy: {final_strategy_perf:.2f}%
+BTC: {final_btc_perf:.2f}%
+Combined: {final_combined_perf:.2f}%
+
+Max Combined: {combined_performance.max():.2f}%
+Min Combined: {combined_performance.min():.2f}%'''
+        
+        ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, fontsize=10,
+                verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+        
+        # Format dates on x-axis
+        ax.tick_params(axis='x', rotation=45)
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, f'{prefix}_combined_performance_chart.png'), dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"Combined performance chart saved: {prefix}_combined_performance_chart.png")
+
+
+class MonteCarloTester:
+    """Performs Monte Carlo permutation testing on backtest results"""
+    
+    def __init__(self, config: BacktestConfig):
+        self.config = config
+
+    @staticmethod
+    def run_single_iteration(args):
+        """Run a single Monte Carlo iteration (for parallel processing)"""
+        i, data, config, mc_tester = args
+        
+        try:
+            # Create permuted data
+            seed = config.monte_carlo_seed + i
+            permuted_data = mc_tester.create_permuted_price_series(data, seed)
+            
+            # Create a copy of config for this permutation
+            perm_config = BacktestConfig()
+            # Copy all attributes from original config
+            for attr, value in vars(config).items():
+                setattr(perm_config, attr, value)
+            
+            # Run backtest on permuted data with potentially updated config
+            perm_engine = BacktestEngine(perm_config, permuted_data, 
+                                       config.feature_column, config.price_column)
+            perm_trades, perm_portfolio = perm_engine.run()
+            
+            # Calculate metrics
+            perm_analyzer = PerformanceAnalyzer(perm_config)
+            perm_metrics = perm_analyzer.calculate_metrics(perm_trades, perm_portfolio)
+            
+            # Add permutation info
+            perm_metrics['permutation_id'] = i
+            perm_metrics['sigmoid_midpoint'] = perm_config.sigmoid_midpoint
+            perm_metrics['sigmoid_steepness'] = perm_config.sigmoid_steepness
+            
+            return perm_metrics
+            
+        except Exception as e:
+            print(f"Warning: Error in permutation {i}: {e}")
+            return None
+
+    def create_permuted_price_series(self, price_data: pd.DataFrame, seed: int) -> pd.DataFrame:
+        """Create permuted price series using block bootstrap"""
+        rng = np.random.RandomState(seed)
+        
+
+        # Get price series
+        price_col = self.config.price_column
+        prices = price_data[price_col].values
+        start_price = prices[0]
+        end_price = prices[-1]
+        original_max = prices.max()
+        original_min = prices.min()
+        # Calculate returns
+        returns = price_data[price_col].pct_change().dropna().values
+        n_returns = len(returns)
+        returns_array = returns
+
+        if n_returns > 50000:
+            block_size = max(50, n_returns // 1000)  # Larger blocks for stability
+        elif n_returns > 10000:
+            block_size = max(100, n_returns // 500)   
+        else:
+            block_size = max(200, n_returns // 50)    
+
+        # Create blocks
+        block_size = min(block_size, n_returns // 10, 1000)
+        blocks = []
+        
+        for i in range(0, n_returns - block_size + 1, block_size):
+            end_idx = min(i + block_size, n_returns)
+            block = returns_array[i:end_idx].copy()
+            blocks.append(block)   
+
+        remainder = n_returns % block_size
+        if remainder > 0:
+            remaining_block = returns_array[-remainder:].copy()
+            blocks.append(remaining_block)
+         
+        # Shuffle blocks
+        block_indices = list(range(len(blocks)))
+        rng.shuffle(block_indices)
+        shuffled_blocks = [blocks[i] for i in block_indices]
+        shuffled_returns = np.concatenate(shuffled_blocks)
+        
+
+        if len(shuffled_returns) > n_returns:
+            shuffled_returns = shuffled_returns[:n_returns]
+        elif len(shuffled_returns) < n_returns:
+            # Pad with random selection from existing returns
+            needed = n_returns - len(shuffled_returns)
+            padding_indices = rng.choice(len(returns_array), size=needed, replace=True)
+            padding = returns_array[padding_indices]
+            shuffled_returns = np.concatenate([shuffled_returns, padding])  
+
+        max_attempts = 5
+        strategies = ['block', 'constrained', 'capped', 'filtered', 'fallback']
+        
+        for attempt, strategy in enumerate(strategies):
+            
+            if strategy == 'block' and attempt == 0:
+                # Use the block bootstrap result
+                final_returns = shuffled_returns
+            elif strategy == 'constrained':
+                # Apply return constraints before shuffling
+                return_std = returns_array.std()
+                return_mean = returns_array.mean()
+                # Clip extreme returns to 3 standard deviations
+                clipped_returns = np.clip(returns_array, 
+                                        return_mean - 3*return_std, 
+                                        return_mean + 3*return_std)
+                shuffled_indices = rng.permutation(len(clipped_returns))
+                final_returns = clipped_returns[shuffled_indices]
+            elif strategy == 'capped':
+                # Use percentile-based capping
+                p1, p99 = np.percentile(returns_array, [1, 99])
+                capped_returns = np.clip(returns_array, p1, p99)
+                shuffled_indices = rng.permutation(len(capped_returns))
+                final_returns = capped_returns[shuffled_indices]
+            elif strategy == 'filtered':
+                # Remove extreme outliers then shuffle
+                q1, q3 = np.percentile(returns_array, [25, 75])
+                iqr = q3 - q1
+                lower_bound = q1 - 3 * iqr
+                upper_bound = q3 + 3 * iqr
+                mask = (returns_array >= lower_bound) & (returns_array <= upper_bound)
+                if mask.sum() > n_returns // 2:  # Ensure we have enough data
+                    filtered_returns = returns_array[mask]
+                    # Sample with replacement to get original length
+                    final_returns = rng.choice(filtered_returns, size=n_returns, replace=True)
+                else:
+                    final_returns = shuffled_returns  # Fall back to original shuffle
+            else:  # fallback
+                # Simple random permutation
+                shuffled_indices = rng.permutation(len(returns_array))
+                final_returns = returns_array[shuffled_indices]
+            
+            # Reconstruct prices
+            reconstructed_prices = [start_price]
+            current_price = start_price
+            max_price_seen = start_price
+            min_price_seen = start_price
+            extreme_detected = False
+            for ret in final_returns:
+                current_price = current_price * (1 + ret)
+                reconstructed_prices.append(current_price)
+                
+                max_price_seen = max(max_price_seen, current_price)
+                min_price_seen = min(min_price_seen, current_price)
+                
+                # More conservative extreme detection
+                if (max_price_seen > original_max * 5 or 
+                    min_price_seen < max(original_min * 0.2, start_price * 0.01) or
+                    current_price <= 0):
+                    extreme_detected = True
+                    break
+            
+            if not extreme_detected:
+                break
+        else:
+            # Ultimate fallback: use original prices with small random noise
+            noise_level = 0.01  # 1% noise
+            noise = rng.normal(0, noise_level, len(prices))
+            reconstructed_prices = prices * (1 + noise)
+            reconstructed_prices[0] = start_price  # Ensure start price
+            reconstructed_prices[-1] = end_price   # Ensure end price
+            
+            # Create permuted dataframe
+            permuted_data = price_data.copy()
+            permuted_data[price_col] = reconstructed_prices
+            return permuted_data
+            
+        reconstructed_end_price = reconstructed_prices[-1]
+        if reconstructed_end_price > 0:
+            # Use multiplicative scaling that respects compounding returns
+            # 1) Compute original vs. reconstructed gross returns
+            P0 = start_price
+            R_orig = end_price / P0
+            R_recon = reconstructed_end_price / P0
+            
+            # 2) Derive per-step adjustment factor f
+            N = len(final_returns)
+            if R_recon > 0 and N > 0:
+                f = (R_orig / R_recon) ** (1.0 / N)
+                
+                # 3) Scale each return multiplicatively
+                scaled_returns = [(1 + r) * f - 1 for r in final_returns]
+                
+                # 4) Rebuild the price path using scaled returns
+                scaled_prices = [P0]
+                for r in scaled_returns:
+                    new_price = scaled_prices[-1] * (1 + r)
+                    # Prevent non-positive prices
+                    scaled_prices.append(max(new_price, P0 * 0.001))
+            else:
+                # Fallback if calculation fails
+                scaled_prices = prices.copy()
+        else:
+            # Fallback to the original series if reconstruction failed
+            scaled_prices = prices.copy()
+        
+        # Create permuted dataframe
+        permuted_data = price_data.copy()
+        permuted_data[price_col] = scaled_prices
+        
+        return permuted_data
+    
+    def run_monte_carlo_test(self, data: pd.DataFrame, n_iterations: int = 100) -> Dict:
+        """Run Monte Carlo permutation test"""
+        print(f"Running Monte Carlo test with {n_iterations} iterations...")
+        
+        # Run original backtest
+        engine = BacktestEngine(self.config, data, self.config.feature_column, self.config.price_column)
+        original_trades, original_portfolio = engine.run()
+        
+        analyzer = PerformanceAnalyzer(self.config)
+        original_metrics = analyzer.calculate_metrics(original_trades, original_portfolio)
+        
+        # Add sigmoid parameters to original metrics
+        original_metrics['sigmoid_midpoint'] = self.config.sigmoid_midpoint
+        original_metrics['sigmoid_steepness'] = self.config.sigmoid_steepness
+        
+        # Store permutation results
+        mc_results = []
+        
+        # Decide whether to use parallel processing
+        if self.config.parallel_mode and n_iterations > 1:
+            print(f"Using parallel processing with {self.config.num_processes or mp.cpu_count()} processes...")
+            
+            # Prepare arguments for parallel processing
+            args_list = [(i, data, self.config, self) for i in range(n_iterations)]
+            
+            # Create pool and run iterations in parallel
+            with mp.Pool(processes=self.config.num_processes) as pool:
+                # Use imap to get progress updates
+                results_iter = pool.imap(MonteCarloTester.run_single_iteration, args_list)
+                
+                # Collect results with progress updates
+                for i, result in enumerate(results_iter):
+                    if result is not None:
+                        mc_results.append(result)
+                    if (i + 1) % 10 == 0:
+                        print(f"Completed {i + 1}/{n_iterations} permutations...")
+        else:
+            # Sequential processing (original code)
+            print("Using sequential processing...")
+            
+            for i in range(n_iterations):
+                if (i + 1) % 10 == 0:
+                    print(f"Completed {i + 1}/{n_iterations} permutations...")
+                
+                try:
+                    # Create permuted data
+                    seed = self.config.monte_carlo_seed + i
+                    permuted_data = self.create_permuted_price_series(data, seed)
+                    
+                    # Create a copy of config for this permutation
+                    perm_config = BacktestConfig()
+                    # Copy all attributes from original config
+                    for attr, value in vars(self.config).items():
+                        setattr(perm_config, attr, value)
+                    
+                    # Run backtest on permuted data with potentially updated config
+                    perm_engine = BacktestEngine(perm_config, permuted_data, 
+                                               self.config.feature_column, self.config.price_column)
+                    perm_trades, perm_portfolio = perm_engine.run()
+                    
+                    # Calculate metrics
+                    perm_analyzer = PerformanceAnalyzer(perm_config)
+                    perm_metrics = perm_analyzer.calculate_metrics(perm_trades, perm_portfolio)
+                    
+                    # Add permutation info
+                    perm_metrics['permutation_id'] = i
+                    perm_metrics['sigmoid_midpoint'] = perm_config.sigmoid_midpoint
+                    perm_metrics['sigmoid_steepness'] = perm_config.sigmoid_steepness
+                    
+                    mc_results.append(perm_metrics)
+                    
+                except Exception as e:
+                    print(f"Warning: Error in permutation {i}: {e}")
+                    continue
+        
+        print(f"Completed {len(mc_results)} successful permutations")
+        
+        # Analyze results
+        analysis = self._analyze_results(original_metrics, mc_results)
+        
+        return {
+            'original': original_metrics,
+            'permutations': mc_results,
+            'analysis': analysis
+        }
+    
+    def _analyze_results(self, original: Dict, permutations: List[Dict]) -> Dict:
+        """Analyze Monte Carlo results"""
+        if not permutations:
+            return {}
+        
+        # Calculate p-values
+        p_values = {}
+        metrics = ['sharpe_ratio', 'total_return', 'profit_factor', 'win_rate']
+        
+        for metric in metrics:
+            if metric in original:
+                better_count = sum(1 for p in permutations if p.get(metric, 0) >= original[metric])
+                p_values[metric] = better_count / len(permutations)
+        
+        # For max_drawdown, lower is better
+        if 'max_drawdown' in original:
+            better_count = sum(1 for p in permutations if p.get('max_drawdown', 1) <= original['max_drawdown'])
+            p_values['max_drawdown'] = better_count / len(permutations)
+        
+        return {
+            'p_values': p_values,
+            'significant_metrics': [k for k, v in p_values.items() if v < 0.05]
+        }
+    
+    def plot_results(self, mc_results: Dict, output_dir: str, prefix: str):
+        """Plot Monte Carlo test results"""
+        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+        
+        original = mc_results['original']
+        perms = mc_results['permutations']
+        p_values = mc_results['analysis']['p_values']
+        
+        # Sharpe Ratio Distribution
+        sharpe_values = [p.get('sharpe_ratio', 0) for p in perms]
+        axes[0, 0].hist(sharpe_values, bins=50, alpha=0.7, color='lightblue', edgecolor='black')
+        axes[0, 0].axvline(original.get('sharpe_ratio', 0), color='red', linewidth=3,
+                          label=f"Original: {original.get('sharpe_ratio', 0):.3f}")
+        axes[0, 0].set_title(f"Sharpe Ratio Distribution\n(p-value: {p_values.get('sharpe_ratio', 1):.4f})")
+        axes[0, 0].set_xlabel('Sharpe Ratio')
+        axes[0, 0].set_ylabel('Frequency')
+        axes[0, 0].legend()
+        axes[0, 0].grid(True, alpha=0.3)
+        
+        # Total Return Distribution
+        return_values = [p.get('total_return_pct', 0) for p in perms]
+        axes[0, 1].hist(return_values, bins=50, alpha=0.7, color='lightgreen', edgecolor='black')
+        axes[0, 1].axvline(original.get('total_return_pct', 0), color='red', linewidth=3,
+                          label=f"Original: {original.get('total_return_pct', 0):.1f}%")
+        axes[0, 1].set_title(f"Total Return Distribution\n(p-value: {p_values.get('total_return', 1):.4f})")
+        axes[0, 1].set_xlabel('Total Return (%)')
+        axes[0, 1].set_ylabel('Frequency')
+        axes[0, 1].legend()
+        axes[0, 1].grid(True, alpha=0.3)
+        
+        # Profit Factor Distribution
+        pf_data = [p.get('profit_factor', 0) for p in perms]
+        pf_data_clipped = np.clip(pf_data, 0, np.percentile(pf_data, 95))  # Clip extreme values for better visualization
+        axes[0, 2].hist(pf_data_clipped, bins=50, alpha=0.7, color='lightyellow', edgecolor='black')
+        axes[0, 2].axvline(original.get('profit_factor', 0), color='red', linewidth=3,
+                          label=f"Original: {original.get('profit_factor', 0):.3f}")
+        axes[0, 2].set_title(f"Profit Factor Distribution\n(p-value: {p_values.get('profit_factor', 1):.4f})")
+        axes[0, 2].set_xlabel('Profit Factor')
+        axes[0, 2].set_ylabel('Frequency')
+        axes[0, 2].legend()
+        axes[0, 2].grid(True, alpha=0.3)
+        
+        # Max Drawdown Distribution
+        dd_values = [p.get('max_drawdown_pct', 0) for p in perms]
+        axes[1, 0].hist(dd_values, bins=50, alpha=0.7, color='lightcoral', edgecolor='black')
+        axes[1, 0].axvline(original.get('max_drawdown_pct', 0), color='red', linewidth=3,
+                          label=f"Original: {original.get('max_drawdown_pct', 0):.1f}%")
+        axes[1, 0].set_title(f"Max Drawdown Distribution\n(p-value: {p_values.get('max_drawdown', 1):.4f})")
+        axes[1, 0].set_xlabel('Max Drawdown (%)')
+        axes[1, 0].set_ylabel('Frequency')
+        axes[1, 0].legend()
+        axes[1, 0].grid(True, alpha=0.3)
+        
+        # Win Rate Distribution
+        winrate_values = [p.get('win_rate', 0) for p in perms]
+        axes[1, 1].hist(winrate_values, bins=50, alpha=0.7, color='lightpink', edgecolor='black')
+        axes[1, 1].axvline(original.get('win_rate', 0), color='red', linewidth=3,
+                          label=f"Original: {original.get('win_rate', 0):.1f}%")
+        axes[1, 1].set_title(f"Win Rate Distribution\n(p-value: {p_values.get('win_rate', 1):.4f})")
+        axes[1, 1].set_xlabel('Win Rate (%)')
+        axes[1, 1].set_ylabel('Frequency')
+        axes[1, 1].legend()
+        axes[1, 1].grid(True, alpha=0.3)
+        
+        # Scatter: Sharpe vs Return
+        axes[1, 2].scatter([p.get('sharpe_ratio', 0) for p in perms], 
+                          [p.get('total_return_pct', 0) for p in perms], 
+                          alpha=0.6, color='lightblue', s=20, edgecolors='black', linewidth=0.5)
+        axes[1, 2].scatter(original.get('sharpe_ratio', 0), original.get('total_return_pct', 0),
+                          color='red', s=100, label='Original', edgecolors='black', linewidth=2)
+        axes[1, 2].set_xlabel('Sharpe Ratio')
+        axes[1, 2].set_ylabel('Total Return (%)')
+        axes[1, 2].set_title('Sharpe Ratio vs Total Return')
+        axes[1, 2].legend()
+        axes[1, 2].grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, f'{prefix}_monte_carlo_analysis.png'), dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        # Additional plot: Sigmoid parameter distributions if recalibration was enabled
+        if 'sigmoid_midpoint' in perms[0]:
+            fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+            
+            # Sigmoid Midpoint Distribution
+            midpoint_values = [p.get('sigmoid_midpoint', self.config.sigmoid_midpoint) for p in perms]
+            axes[0].hist(midpoint_values, bins=30, alpha=0.7, color='lightblue', edgecolor='black')
+            axes[0].axvline(original.get('sigmoid_midpoint', self.config.sigmoid_midpoint), color='red', linewidth=3, 
+                           label=f"Original: {original.get('sigmoid_midpoint', self.config.sigmoid_midpoint):.3f}")
+            axes[0].set_title('Sigmoid Midpoint Distribution')
+            axes[0].set_xlabel('Sigmoid Midpoint')
+            axes[0].set_ylabel('Frequency')
+            axes[0].legend()
+            axes[0].grid(True, alpha=0.3)
+            
+            # Sigmoid Steepness Distribution
+            steepness_values = [p.get('sigmoid_steepness', self.config.sigmoid_steepness) for p in perms]
+            axes[1].hist(steepness_values, bins=30, alpha=0.7, color='lightgreen', edgecolor='black')
+            axes[1].axvline(original.get('sigmoid_steepness', self.config.sigmoid_steepness), color='red', linewidth=3,
+                           label=f"Original: {original.get('sigmoid_steepness', self.config.sigmoid_steepness):.3f}")
+            axes[1].set_title('Sigmoid Steepness Distribution')
+            axes[1].set_xlabel('Sigmoid Steepness')
+            axes[1].set_ylabel('Frequency')
+            axes[1].legend()
+            axes[1].grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            plt.savefig(os.path.join(output_dir, f'{prefix}_sigmoid_parameters_distribution.png'), dpi=300, bbox_inches='tight')
+            plt.close()
+
+    def create_permuted_price_series_range(self, data: pd.DataFrame, start_date: pd.Timestamp, 
+                                          end_date: pd.Timestamp, seed: int) -> pd.DataFrame:
+        """
+        Create permuted price series only for a specific date range
+        
+        Args:
+            data: Full dataframe with price data
+            start_date: Start of range to permute
+            end_date: End of range to permute
+            seed: Random seed
+            
+        Returns:
+            DataFrame with only the specified range permuted
+        """
+        # Split data into three parts
+        before_range = data[data['timestamp'] < start_date].copy()
+        in_range = data[(data['timestamp'] >= start_date) & (data['timestamp'] <= end_date)].copy()
+        after_range = data[data['timestamp'] > end_date].copy()
+        
+        if in_range.empty:
+            return data.copy()
+        
+        # Get the price at the boundary
+        boundary_price = in_range[self.config.price_column].iloc[0]
+        
+        # Permute only the in-range portion
+        permuted_range = self.create_permuted_price_series(in_range, seed)
+        
+        # Scale the permuted prices to start from the boundary price
+        permuted_prices = permuted_range[self.config.price_column].values
+        if permuted_prices[0] != 0:
+            scale_factor = boundary_price / permuted_prices[0]
+            permuted_range[self.config.price_column] = permuted_prices * scale_factor
+        
+        # Combine all parts back together
+        result = pd.concat([before_range, permuted_range, after_range], ignore_index=True)
+        result = result.sort_values('timestamp').reset_index(drop=True)
+        
+        return result
+
+
+class WalkforwardValidator:
+    """Performs walkforward validation testing"""
+    
+    def __init__(self, config: BacktestConfig):
+        self.config = config
+
+    
+    def split_data_windows(self, data: pd.DataFrame) -> List[Tuple[pd.DataFrame, pd.DataFrame, Dict]]:
+        """Split data into train/test windows"""
+        windows = []
+        
+        start_date = data['timestamp'].min()
+        end_date = data['timestamp'].max()
+        
+        current_start = start_date
+        
+        while True:
+            # Calculate window boundaries
+            if self.config.walkforward_period == 'hour':
+                train_end = current_start + pd.DateOffset(hours=self.config.walkforward_train)
+                test_start = train_end
+                test_end = test_start + pd.DateOffset(hours=self.config.walkforward_test)
+            elif self.config.walkforward_period == 'day':
+                train_end = current_start + pd.DateOffset(days=self.config.walkforward_train)
+                test_start = train_end
+                test_end = test_start + pd.DateOffset(days=self.config.walkforward_test)
+            elif self.config.walkforward_period == 'month':
+                train_end = current_start + pd.DateOffset(months=self.config.walkforward_train)
+                test_start = train_end
+                test_end = test_start + pd.DateOffset(months=self.config.walkforward_test)
+            elif self.config.walkforward_period == 'year':
+                train_end = current_start + pd.DateOffset(years=self.config.walkforward_train)
+                test_start = train_end
+                test_end = test_start + pd.DateOffset(years=self.config.walkforward_test)
+
+            if test_end > end_date:
+                break
+            
+            # Split data
+            train_data = data[(data['timestamp'] >= current_start) & 
+                            (data['timestamp'] < train_end)]
+            test_data = data[(data['timestamp'] >= test_start) & 
+                           (data['timestamp'] < test_end)]
+            
+            if len(train_data) > 100 and len(test_data) > 20:
+                window_info = {
+                    'train_start': current_start,
+                    'train_end': train_end,
+                    'test_start': test_start,
+                    'test_end': test_end,
+                    'train_size': len(train_data),
+                    'test_size': len(test_data)
+                }
+                windows.append((train_data, test_data, window_info))
+            
+            # Move to next window
+            if self.config.walkforward_period == 'hour':
+                current_start = current_start + pd.DateOffset(hours=self.config.walkforward_step)
+            elif self.config.walkforward_period == 'day':
+                current_start = current_start + pd.DateOffset(days=self.config.walkforward_step)
+            elif self.config.walkforward_period == 'month':
+                current_start = current_start + pd.DateOffset(months=self.config.walkforward_step)
+            elif self.config.walkforward_period == 'year':
+                current_start = current_start + pd.DateOffset(years=self.config.walkforward_step) 
+
+        return windows
+    
+    def run_walkforward_test(self, data: pd.DataFrame) -> Dict:
+        """Run walkforward validation"""
+        print("Running walkforward validation...")
+        
+        # Split data into windows
+        windows = self.split_data_windows(data)
+        print(f"Found {len(windows)} valid windows")
+        
+        if not windows:
+            return None
+        
+        results = []
+        all_oos_trades = []
+        all_oos_portfolio = []
+        
+        for i, (train_data, test_data, window_info) in enumerate(windows):
+            print(f"Processing window {i+1}/{len(windows)}")
+            
+            try:
+                # Calibrate on training data
+                position_manager = PositionManager(self.config)
+                position_manager.calibrate_sigmoid(train_data[self.config.feature_column].values)
+                
+                # Run in-sample backtest
+                is_engine = BacktestEngine(self.config, train_data, 
+                                         self.config.feature_column, self.config.price_column)
+                is_trades, is_portfolio = is_engine.run()
+                
+                # Run out-of-sample backtest
+                oos_engine = BacktestEngine(self.config, test_data,
+                                          self.config.feature_column, self.config.price_column)
+                oos_trades, oos_portfolio = oos_engine.run()
+                
+                # Calculate metrics
+                analyzer = PerformanceAnalyzer(self.config)
+                is_metrics = analyzer.calculate_metrics(is_trades, is_portfolio)
+                oos_metrics = analyzer.calculate_metrics(oos_trades, oos_portfolio)
+                
+                # Store results
+                window_result = {
+                    'window_id': i,
+                    **window_info,
+                    'is_sharpe': is_metrics.get('sharpe_ratio', 0),
+                    'is_return': is_metrics.get('total_return_pct', 0),
+                    'is_profit_factor': is_metrics.get('profit_factor', 0),
+                    'is_max_drawdown': is_metrics.get('max_drawdown_pct', 0),
+                    'oos_sharpe': oos_metrics.get('sharpe_ratio', 0),
+                    'oos_return': oos_metrics.get('total_return_pct', 0),
+                    'oos_profit_factor': oos_metrics.get('profit_factor', 0),
+                    'oos_max_drawdown': oos_metrics.get('max_drawdown_pct', 0),
+                    'oos_winrate': oos_metrics.get('win_rate', 0)
+                }
+                results.append(window_result)
+                
+                # Collect OOS results
+                if not oos_trades.empty:
+                    all_oos_trades.append(oos_trades)
+                if not oos_portfolio.empty:
+                    all_oos_portfolio.append(oos_portfolio)
+                
+            except Exception as e:
+                print(f"Error in window {i}: {e}")
+                continue
+        
+        # Analyze results
+        analysis = self._analyze_results(results)
+        
+        return {
+            'windows': results,
+            'analysis': analysis,
+            'combined_oos_trades': pd.concat(all_oos_trades) if all_oos_trades else pd.DataFrame(),
+            'combined_oos_portfolio': pd.concat(all_oos_portfolio) if all_oos_portfolio else pd.DataFrame()
+        }
+    
+    def _analyze_results(self, results: List[Dict]) -> Dict:
+        """Analyze walkforward results"""
+        if not results:
+            return {}
+        
+        df = pd.DataFrame(results)
+        
+        return {
+            'num_windows': len(results),
+            'avg_oos_sharpe': df['oos_sharpe'].mean(),
+            'avg_oos_return': df['oos_return'].mean(),
+            'avg_oos_profit_factor': df['oos_profit_factor'].mean(),
+            'avg_oos_max_drawdown': df['oos_max_drawdown'].mean(),
+            'avg_oos_winrate': df['oos_winrate'].mean(),
+            'positive_return_windows': len(df[df['oos_return'] > 0]),
+            'is_oos_correlation': {
+                'sharpe': df[['is_sharpe', 'oos_sharpe']].corr().iloc[0, 1],
+                'return': df[['is_return', 'oos_return']].corr().iloc[0, 1],
+                'profit_factor': df[['is_profit_factor', 'oos_profit_factor']].corr().iloc[0, 1]
+            }
+        }
+    
+    def plot_results(self, wf_results: Dict, output_dir: str, prefix: str):
+        """Plot walkforward validation results"""
+        if not wf_results or not wf_results['windows']:
+            return
+        
+        df = pd.DataFrame(wf_results['windows'])
+        analysis = wf_results['analysis']
+        
+        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+        
+        # OOS Returns over time
+        axes[0, 0].plot(df.index, df['oos_return'], marker='o', linewidth=2)
+        axes[0, 0].axhline(y=0, color='red', linestyle='--')
+        axes[0, 0].set_title('Out-of-Sample Returns by Window')
+        axes[0, 0].set_xlabel('Window Number')
+        axes[0, 0].set_ylabel('Return (%)')
+        axes[0, 0].grid(True)
+        
+        # IS vs OOS Returns
+        axes[0, 1].scatter(df['is_return'], df['oos_return'], alpha=0.7)
+        axes[0, 1].plot([df['is_return'].min(), df['is_return'].max()],
+                       [df['is_return'].min(), df['is_return'].max()], 'r--', alpha=0.5)
+        corr = analysis['is_oos_correlation']['return']
+        axes[0, 1].set_title(f'IS vs OOS Returns (corr={corr:.3f})')
+        axes[0, 1].set_xlabel('In-Sample Return (%)')
+        axes[0, 1].set_ylabel('Out-of-Sample Return (%)')
+        axes[0, 1].grid(True)
+        
+        # OOS Sharpe over time
+        axes[1, 0].plot(df.index, df['oos_sharpe'], marker='s', linewidth=2, color='green')
+        axes[1, 0].axhline(y=0, color='red', linestyle='--')
+        axes[1, 0].set_title('Out-of-Sample Sharpe by Window')
+        axes[1, 0].set_xlabel('Window Number')
+        axes[1, 0].set_ylabel('Sharpe Ratio')
+        axes[1, 0].grid(True)
+        
+        # Summary stats
+        axes[1, 1].axis('off')
+        summary_text = f"""
+        Walkforward Summary:
+
+        Windows: {analysis['num_windows']}
+        Avg OOS Return: {analysis['avg_oos_return']:.2f}%
+        Avg OOS Sharpe: {analysis['avg_oos_sharpe']:.3f}
+        Avg OOS Profit Factor: {analysis['avg_oos_profit_factor']:.3f}
+        Avg OOS Max Drawdown: {analysis['avg_oos_max_drawdown']:.2f}%
+        Avg OOS Win Rate: {analysis['avg_oos_winrate']:.2f}%
+
+        Positive Windows: {analysis['positive_return_windows']}/{analysis['num_windows']}
+        Success Rate: {analysis['positive_return_windows']}/{analysis['num_windows']}
+        ({analysis['positive_return_windows']/analysis['num_windows']*100:.1f}%)
+
+        IS-OOS Correlations:
+        Return: {analysis['is_oos_correlation']['return']:.3f}
+        Sharpe: {analysis['is_oos_correlation']['sharpe']:.3f}
+        Profit Factor: {analysis['is_oos_correlation']['profit_factor']:.3f}
+                """
+        axes[1, 1].text(0.1, 0.9, summary_text, transform=axes[1, 1].transAxes,
+                       fontsize=11, verticalalignment='top', fontfamily='monospace')
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, f'{prefix}_walkforward_analysis.png'), dpi=300, bbox_inches='tight')
+        plt.close()
+
+
+class WalkforwardMonteCarloTester:
+    """Performs walkforward validation on Monte Carlo permuted data"""
+    
+    def __init__(self, config: BacktestConfig):
+        self.config = config
+        self.monte_carlo_tester = MonteCarloTester(config)
+        self.walkforward_validator = WalkforwardValidator(config)
+    
+    @staticmethod
+    def run_single_iteration(args):
+        """Run a single Walkforward Monte Carlo iteration (for parallel processing)"""
+        i, original_data, config, mc_tester, walkforward_validator = args
+        
+        try:
+            # For this iteration, collect all window results
+            iteration_windows = []
+            
+            # Get the data windows
+            windows = walkforward_validator.split_data_windows(original_data)
+            
+            for window_idx, (train_data, test_data, window_info) in enumerate(windows):
+                # Create a copy of the full data
+                permuted_data = original_data.copy()
+                
+                # Permute only the test period
+                seed = config.monte_carlo_seed + i * 1000 + window_idx
+                permuted_data = mc_tester.create_permuted_price_series_range(
+                    permuted_data,
+                    window_info['test_start'],
+                    window_info['test_end'],
+                    seed
+                )
+                
+                # Extract the permuted test data
+                permuted_test_data = permuted_data[
+                    (permuted_data['timestamp'] >= window_info['test_start']) &
+                    (permuted_data['timestamp'] < window_info['test_end'])
+                ]
+                
+                # Calibrate on original training data (unchanged)
+                position_manager = PositionManager(config)
+                position_manager.calibrate_sigmoid(train_data[config.feature_column].values)
+                
+                # Run in-sample backtest on original training data
+                is_engine = BacktestEngine(config, train_data,
+                                         config.feature_column, config.price_column)
+                is_trades, is_portfolio = is_engine.run()
+                
+                # Run out-of-sample backtest on permuted test data
+                oos_engine = BacktestEngine(config, permuted_test_data,
+                                          config.feature_column, config.price_column)
+                oos_trades, oos_portfolio = oos_engine.run()
+                
+                # Calculate metrics
+                analyzer = PerformanceAnalyzer(config)
+                is_metrics = analyzer.calculate_metrics(is_trades, is_portfolio)
+                oos_metrics = analyzer.calculate_metrics(oos_trades, oos_portfolio)
+                
+                # Store window results
+                window_result = {
+                    'window_id': window_idx,
+                    **window_info,
+                    'is_sharpe': is_metrics.get('sharpe_ratio', 0),
+                    'is_return': is_metrics.get('total_return_pct', 0),
+                    'is_profit_factor': is_metrics.get('profit_factor', 0),
+                    'is_max_drawdown': is_metrics.get('max_drawdown_pct', 0),
+                    'oos_sharpe': oos_metrics.get('sharpe_ratio', 0),
+                    'oos_return': oos_metrics.get('total_return_pct', 0),
+                    'oos_profit_factor': oos_metrics.get('profit_factor', 0),
+                    'oos_max_drawdown': oos_metrics.get('max_drawdown_pct', 0),
+                    'oos_winrate': oos_metrics.get('win_rate', 0)
+                }
+                iteration_windows.append(window_result)
+            
+            # Analyze this iteration's results
+            if iteration_windows:
+                # Calculate aggregate metrics for this iteration
+                df = pd.DataFrame(iteration_windows)
+                return {
+                    'iteration': i,
+                    'avg_oos_return': df['oos_return'].mean(),
+                    'avg_oos_sharpe': df['oos_sharpe'].mean(),
+                    'avg_oos_profit_factor': df['oos_profit_factor'].mean(),
+                    'avg_oos_max_drawdown': df['oos_max_drawdown'].mean(),
+                    'avg_oos_winrate': df['oos_winrate'].mean(),
+                    'positive_return_windows': len(df[df['oos_return'] > 0]),
+                    'num_windows': len(df),
+                    'success_rate': len(df[df['oos_return'] > 0]) / len(df) if len(df) > 0 else 0
+                }
+            
+            return None
+            
+        except Exception as e:
+            print(f"Warning: Error in Walkforward MC permutation {i}: {e}")
+            return None
+    
+    def run_walkforward_monte_carlo(self, original_data: pd.DataFrame, n_iterations: int = 100) -> Dict:
+        """
+        Run walkforward validation with Monte Carlo permutation on OOS data only
+        
+        Args:
+            original_data: Original merged data with price and features
+            n_iterations: Number of Monte Carlo iterations
+            
+        Returns:
+            Dictionary with original walkforward results and permutation results
+        """
+        print(f"Running Walkforward Monte Carlo test with {n_iterations} iterations...")
+        print("Note: Only OOS data will be permuted, training data remains unchanged")
+        
+        # First, run walkforward on original data as baseline
+        print("Running baseline walkforward on original data...")
+        original_wf_results = self.walkforward_validator.run_walkforward_test(original_data)
+        
+        if not original_wf_results:
+            print("Error: Could not run walkforward on original data")
+            return None
+        
+        # Extract key metrics from original walkforward
+        original_analysis = self.walkforward_validator._analyze_results(original_wf_results['windows'])
+        
+        # Store permutation results
+        permutation_results = []
+        successful_iterations = 0
+        
+        # Decide whether to use parallel processing
+        if self.config.parallel_mode and n_iterations > 1:
+            print(f"Using parallel processing with {self.config.num_processes or mp.cpu_count()} processes...")
+            
+            # Prepare arguments for parallel processing
+            args_list = [(i, original_data, self.config, self.monte_carlo_tester, self.walkforward_validator) 
+                         for i in range(n_iterations)]
+            
+            # Create pool and run iterations in parallel
+            with mp.Pool(processes=self.config.num_processes) as pool:
+                # Use imap to get progress updates
+                results_iter = pool.imap(WalkforwardMonteCarloTester.run_single_iteration, args_list)
+                
+                # Collect results with progress updates
+                for i, result in enumerate(results_iter):
+                    if result is not None:
+                        permutation_results.append(result)
+                        successful_iterations += 1
+                    if (i + 1) % 10 == 0:
+                        print(f"Completed {i + 1}/{n_iterations} permutations...")
+        else:
+            # Sequential processing (original code)
+            print("Using sequential processing...")
+            
+            # Run Monte Carlo permutations
+            for i in range(n_iterations):
+                if (i + 1) % 10 == 0:
+                    print(f"Completed {i + 1}/{n_iterations} permutations...")
+                
+                try:
+                    # For this iteration, collect all window results
+                    iteration_windows = []
+                    
+                    # Get the data windows
+                    windows = self.walkforward_validator.split_data_windows(original_data)
+                    
+                    for window_idx, (train_data, test_data, window_info) in enumerate(windows):
+                        # Create a copy of the full data
+                        permuted_data = original_data.copy()
+                        
+                        # Permute only the test period
+                        seed = self.config.monte_carlo_seed + i * 1000 + window_idx
+                        permuted_data = self.monte_carlo_tester.create_permuted_price_series_range(
+                            permuted_data,
+                            window_info['test_start'],
+                            window_info['test_end'],
+                            seed
+                        )
+                        
+                        # Extract the permuted test data
+                        permuted_test_data = permuted_data[
+                            (permuted_data['timestamp'] >= window_info['test_start']) &
+                            (permuted_data['timestamp'] < window_info['test_end'])
+                        ]
+                        
+                        # Calibrate on original training data (unchanged)
+                        position_manager = PositionManager(self.config)
+                        position_manager.calibrate_sigmoid(train_data[self.config.feature_column].values)
+                        
+                        # Run in-sample backtest on original training data
+                        is_engine = BacktestEngine(self.config, train_data,
+                                                 self.config.feature_column, self.config.price_column)
+                        is_trades, is_portfolio = is_engine.run()
+                        
+                        # Run out-of-sample backtest on permuted test data
+                        oos_engine = BacktestEngine(self.config, permuted_test_data,
+                                                  self.config.feature_column, self.config.price_column)
+                        oos_trades, oos_portfolio = oos_engine.run()
+                        
+                        # Calculate metrics
+                        analyzer = PerformanceAnalyzer(self.config)
+                        is_metrics = analyzer.calculate_metrics(is_trades, is_portfolio)
+                        oos_metrics = analyzer.calculate_metrics(oos_trades, oos_portfolio)
+                        
+                        # Store window results
+                        window_result = {
+                            'window_id': window_idx,
+                            **window_info,
+                            'is_sharpe': is_metrics.get('sharpe_ratio', 0),
+                            'is_return': is_metrics.get('total_return_pct', 0),
+                            'is_profit_factor': is_metrics.get('profit_factor', 0),
+                            'is_max_drawdown': is_metrics.get('max_drawdown_pct', 0),
+                            'oos_sharpe': oos_metrics.get('sharpe_ratio', 0),
+                            'oos_return': oos_metrics.get('total_return_pct', 0),
+                            'oos_profit_factor': oos_metrics.get('profit_factor', 0),
+                            'oos_max_drawdown': oos_metrics.get('max_drawdown_pct', 0),
+                            'oos_winrate': oos_metrics.get('win_rate', 0)
+                        }
+                        iteration_windows.append(window_result)
+                    
+                    # Analyze this iteration's results
+                    if iteration_windows:
+                        perm_analysis = self.walkforward_validator._analyze_results(iteration_windows)
+                        
+                        # Store key metrics
+                        permutation_results.append({
+                            'iteration': i,
+                            'avg_oos_return': perm_analysis['avg_oos_return'],
+                            'avg_oos_sharpe': perm_analysis['avg_oos_sharpe'],
+                            'avg_oos_profit_factor': perm_analysis['avg_oos_profit_factor'],
+                            'avg_oos_max_drawdown': perm_analysis['avg_oos_max_drawdown'],
+                            'avg_oos_winrate': perm_analysis['avg_oos_winrate'],
+                            'positive_return_windows': perm_analysis['positive_return_windows'],
+                            'num_windows': perm_analysis['num_windows'],
+                            'success_rate': perm_analysis['positive_return_windows'] / perm_analysis['num_windows'] if perm_analysis['num_windows'] > 0 else 0
+                        })
+                        successful_iterations += 1
+                        
+                except Exception as e:
+                    print(f"Warning: Error in permutation {i}: {e}")
+                    continue
+        
+        print(f"Completed {successful_iterations} successful permutations out of {n_iterations}")
+        
+        # Calculate p-values
+        p_values = self._calculate_p_values(original_analysis, permutation_results)
+        
+        return {
+            'original': original_analysis,
+            'original_windows': original_wf_results['windows'],
+            'permutations': permutation_results,
+            'p_values': p_values,
+            'num_iterations': successful_iterations
+        }
+    
+    def _calculate_p_values(self, original: Dict, permutations: List[Dict]) -> Dict:
+        """Calculate p-values for walkforward metrics"""
+        if not permutations:
+            return {}
+        
+        p_values = {}
+        metrics = ['avg_oos_return', 'avg_oos_sharpe', 'avg_oos_profit_factor', 'avg_oos_winrate', 'success_rate']
+        
+        for metric in metrics:
+            if metric in original:
+                # Count how many permutations performed better
+                better_count = sum(1 for p in permutations if p.get(metric, -999) >= original[metric])
+                p_values[metric] = better_count / len(permutations)
+        
+        # For max drawdown, lower is better
+        if 'avg_oos_max_drawdown' in original:
+            better_count = sum(1 for p in permutations if p.get('avg_oos_max_drawdown', 999) <= original['avg_oos_max_drawdown'])
+            p_values['avg_oos_max_drawdown'] = better_count / len(permutations)
+        
+        return p_values
+    
+    def plot_results(self, results: Dict, output_dir: str, prefix: str):
+        """Plot walkforward Monte Carlo results"""
+        if not results or not results['permutations']:
+            print("No results to plot")
+            return
+        
+        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+        
+        original = results['original']
+        perms_df = pd.DataFrame(results['permutations'])
+        p_values = results['p_values']
+        
+        # 1. Average OOS Return Distribution
+        axes[0, 0].hist(perms_df['avg_oos_return'], bins=50, alpha=0.7, color='lightblue', edgecolor='black')
+        axes[0, 0].axvline(original['avg_oos_return'], color='red', linewidth=3,
+                          label=f"Original: {original['avg_oos_return']:.2f}%")
+        axes[0, 0].set_title(f"Avg OOS Return Distribution\n(p-value: {p_values.get('avg_oos_return', 1):.4f})")
+        axes[0, 0].set_xlabel('Average OOS Return (%)')
+        axes[0, 0].set_ylabel('Frequency')
+        axes[0, 0].legend()
+        axes[0, 0].grid(True, alpha=0.3)
+        
+        # 2. Average OOS Sharpe Distribution
+        axes[0, 1].hist(perms_df['avg_oos_sharpe'], bins=50, alpha=0.7, color='lightgreen', edgecolor='black')
+        axes[0, 1].axvline(original['avg_oos_sharpe'], color='red', linewidth=3,
+                          label=f"Original: {original['avg_oos_sharpe']:.3f}")
+        axes[0, 1].set_title(f"Avg OOS Sharpe Distribution\n(p-value: {p_values.get('avg_oos_sharpe', 1):.4f})")
+        axes[0, 1].set_xlabel('Average OOS Sharpe')
+        axes[0, 1].set_ylabel('Frequency')
+        axes[0, 1].legend()
+        axes[0, 1].grid(True, alpha=0.3)
+        
+        # 3. Success Rate Distribution
+        axes[0, 2].hist(perms_df['success_rate'] * 100, bins=50, alpha=0.7, color='lightyellow', edgecolor='black')
+        original_success_rate = original['positive_return_windows'] / original['num_windows']
+        axes[0, 2].axvline(original_success_rate * 100, color='red', linewidth=3,
+                          label=f"Original: {original_success_rate*100:.1f}%")
+        axes[0, 2].set_title(f"Window Success Rate Distribution\n(p-value: {p_values.get('success_rate', 1):.4f})")
+        axes[0, 2].set_xlabel('Success Rate (%)')
+        axes[0, 2].set_ylabel('Frequency')
+        axes[0, 2].legend()
+        axes[0, 2].grid(True, alpha=0.3)
+        
+        # 4. Average OOS Profit Factor Distribution
+        axes[1, 0].hist(perms_df['avg_oos_profit_factor'], bins=50, alpha=0.7, color='lightcoral', edgecolor='black')
+        axes[1, 0].axvline(original['avg_oos_profit_factor'], color='red', linewidth=3,
+                          label=f"Original: {original['avg_oos_profit_factor']:.3f}")
+        axes[1, 0].set_title(f"Avg OOS Profit Factor Distribution\n(p-value: {p_values.get('avg_oos_profit_factor', 1):.4f})")
+        axes[1, 0].set_xlabel('Average OOS Profit Factor')
+        axes[1, 0].set_ylabel('Frequency')
+        axes[1, 0].legend()
+        axes[1, 0].grid(True, alpha=0.3)
+        
+        # 5. Average OOS Max Drawdown Distribution
+        axes[1, 1].hist(perms_df['avg_oos_max_drawdown'], bins=50, alpha=0.7, color='lightpink', edgecolor='black')
+        axes[1, 1].axvline(original['avg_oos_max_drawdown'], color='red', linewidth=3,
+                          label=f"Original: {original['avg_oos_max_drawdown']:.2f}%")
+        axes[1, 1].set_title(f"Avg OOS Max Drawdown Distribution\n(p-value: {p_values.get('avg_oos_max_drawdown', 1):.4f})")
+        axes[1, 1].set_xlabel('Average OOS Max Drawdown (%)')
+        axes[1, 1].set_ylabel('Frequency')
+        axes[1, 1].legend()
+        axes[1, 1].grid(True, alpha=0.3)
+        
+        # 6. Summary statistics
+        axes[1, 2].axis('off')
+        summary_text = f"""
+        Walkforward Monte Carlo Summary:
+
+        Test Method: Training data unchanged, only OOS data permuted
+
+        Original Walkforward Performance:
+        - Avg OOS Return: {original['avg_oos_return']:.2f}%
+        - Avg OOS Sharpe: {original['avg_oos_sharpe']:.3f}
+        - Success Rate: {original['positive_return_windows']}/{original['num_windows']} ({original_success_rate*100:.1f}%)
+
+        Permutation Test Results:
+        - Total Iterations: {results['num_iterations']}
+        - Each iteration: Real training → Randomized OOS
+
+        P-Values (vs random OOS data):
+        - OOS Return: {p_values.get('avg_oos_return', 1):.4f}
+        - OOS Sharpe: {p_values.get('avg_oos_sharpe', 1):.4f}
+        - Success Rate: {p_values.get('success_rate', 1):.4f}
+        - Profit Factor: {p_values.get('avg_oos_profit_factor', 1):.4f}
+        - Max Drawdown: {p_values.get('avg_oos_max_drawdown', 1):.4f}
+
+        Significant (p < 0.05): {', '.join([k for k, v in p_values.items() if v < 0.05]) or 'None'}
+        """
+        axes[1, 2].text(0.1, 0.9, summary_text, transform=axes[1, 2].transAxes,
+                       fontsize=10, verticalalignment='top', fontfamily='monospace')
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, f'{prefix}_walkforward_monte_carlo_analysis.png'), dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"Walkforward Monte Carlo plot saved to {output_dir}")
+
+
+class GridSearchOptimizer:
+    """Performs grid search optimization on backtest parameters"""
+    
+    def __init__(self, config: BacktestConfig):
+        self.config = config
+        self.results = []
+    
+    def generate_parameter_combinations(self) -> List[Dict]:
+        """Generate all parameter combinations from grid search config"""
+        if not self.config.grid_search_params:
+            return [{}]
+        
+        # Get parameter names and their possible values
+        param_names = list(self.config.grid_search_params.keys())
+        param_values = list(self.config.grid_search_params.values())
+        
+        # Generate all combinations
+        combinations = []
+        for combo in itertools.product(*param_values):
+            param_dict = dict(zip(param_names, combo))
+            combinations.append(param_dict)
+        
+        print(f"Generated {len(combinations)} parameter combinations")
+        return combinations
+    
+    def run_single_backtest(self, params: Dict, merged_data: pd.DataFrame, 
+                          feature_column: str, price_column: str) -> Dict:
+        """Run a single backtest with given parameters"""
+        # Create a copy of the config for this run
+        test_config = BacktestConfig()
+        
+        # Copy all attributes from original config
+        for attr, value in vars(self.config).items():
+            setattr(test_config, attr, value)
+        
+        # Apply grid search parameters
+        for param, value in params.items():
+            if hasattr(test_config, param):
+                setattr(test_config, param, value)
+        
+        # Set required columns
+        test_config.feature_column = feature_column
+        test_config.price_column = price_column
+        
+        # Calibrate position sizing
+        position_manager = PositionManager(test_config)
+        position_manager.calibrate_sigmoid(merged_data[feature_column].values)
+        
+        # Run backtest
+        engine = BacktestEngine(test_config, merged_data, feature_column, price_column)
+        trades_df, portfolio_df = engine.run()
+        
+        # Calculate performance
+        analyzer = PerformanceAnalyzer(test_config)
+        metrics = analyzer.calculate_metrics(trades_df, portfolio_df)
+        
+        # Add parameter information to metrics
+        metrics['parameters'] = params.copy()
+        
+        return metrics
+    
+    def run_grid_search(self, merged_data: pd.DataFrame, feature_column: str, price_column: str) -> Dict:
+        """Run grid search optimization"""
+        print("\n" + "="*60)
+        print("Running Grid Search Optimization")
+        print("="*60)
+        
+        # Generate parameter combinations
+        param_combinations = self.generate_parameter_combinations()
+        
+        print(f"Grid search parameters:")
+        for param, values in self.config.grid_search_params.items():
+            print(f"  {param}: {values}")
+        
+        print(f"\nOptimization objectives: {', '.join(self.config.grid_search_objectives)}")
+        
+        # Run backtests for all combinations
+        all_results = []
+        for i, params in enumerate(param_combinations):
+            print(f"\nRunning backtest {i+1}/{len(param_combinations)}: {params}")
+            
+            try:
+                metrics = self.run_single_backtest(params, merged_data, feature_column, price_column)
+                all_results.append(metrics)
+                
+                # Print quick summary
+                sharpe = metrics.get('sharpe_ratio', 0)
+                total_ret = metrics.get('total_return_pct', 0)
+                profit_factor = metrics.get('profit_factor', 0)
+                print(f"  Results: Sharpe={sharpe:.3f}, Return={total_ret:.2f}%, PF={profit_factor:.3f}")
+                
+            except Exception as e:
+                print(f"  Error: {e}")
+                continue
+        
+        print(f"\nCompleted {len(all_results)} successful backtests out of {len(param_combinations)}")
+        
+        # Find best results for each objective
+        best_results = self._find_best_results(all_results)
+        
+        return {
+            'all_results': all_results,
+            'best_results': best_results,
+            'param_combinations': param_combinations
+        }
+    
+    def _find_best_results(self, all_results: List[Dict]) -> Dict:
+        """Find best results for each optimization objective"""
+        best_results = {}
+        
+        for objective in self.config.grid_search_objectives:
+            if not all_results:
+                continue
+                
+            # Find best result for this objective
+            best_result = None
+            best_value = float('-inf')
+            
+            # For max_drawdown, lower is better (but we'll handle this specially)
+            if objective == 'max_drawdown':
+                best_value = float('inf')
+            
+            for result in all_results:
+                if objective in result:
+                    value = result[objective]
+                    
+                    # Handle max_drawdown (lower is better)
+                    if objective == 'max_drawdown':
+                        if value < best_value:
+                            best_value = value
+                            best_result = result
+                    else:
+                        # Higher is better for most metrics
+                        if value > best_value:
+                            best_value = value
+                            best_result = result
+            
+            if best_result:
+                best_results[objective] = best_result
+                print(f"Best {objective}: {best_value:.4f} with params {best_result['parameters']}")
+        
+        return best_results
+    
+    def save_grid_search_results(self, grid_results: Dict, merged_data: pd.DataFrame, 
+                               feature_column: str, price_column: str):
+        """Save detailed results for best parameter combinations"""
+        base_output_dir = self.config.output_dir
+        
+        for objective, best_result in grid_results['best_results'].items():
+            # Create objective-specific directory
+            objective_dir = os.path.join(base_output_dir, f"best_{objective}")
+            if not os.path.exists(objective_dir):
+                os.makedirs(objective_dir)
+            
+            print(f"\nSaving detailed results for best {objective} to {objective_dir}")
+            
+            # Create config for this best result
+            best_config = BacktestConfig()
+            
+            # Copy all attributes from original config
+            for attr, value in vars(self.config).items():
+                setattr(best_config, attr, value)
+            
+            # Apply best parameters
+            for param, value in best_result['parameters'].items():
+                if hasattr(best_config, param):
+                    setattr(best_config, param, value)
+            
+            # Set output directory and columns
+            best_config.output_dir = objective_dir
+            best_config.output_prefix = f"best_{objective}"
+            best_config.feature_column = feature_column
+            best_config.price_column = price_column
+            
+            # Run full backtest with visualizations and analysis
+            self._run_full_backtest_analysis(best_config, merged_data, best_result)
+        
+        # Save summary of all results
+        self._save_grid_search_summary(grid_results, base_output_dir)
+    
+    def _run_full_backtest_analysis(self, config: BacktestConfig, merged_data: pd.DataFrame, 
+                                  result_metrics: Dict):
+        """Run full backtest with all analysis and visualizations"""
+        # Calibrate position sizing
+        position_manager = PositionManager(config)
+        position_manager.calibrate_sigmoid(merged_data[config.feature_column].values)
+        
+        # Run backtest
+        engine = BacktestEngine(config, merged_data, config.feature_column, config.price_column)
+        trades_df, portfolio_df = engine.run()
+        
+        # Calculate performance
+        analyzer = PerformanceAnalyzer(config)
+        metrics = analyzer.calculate_metrics(trades_df, portfolio_df)
+        summary = analyzer.generate_summary(metrics)
+        
+        # Save results
+        output_dir = config.output_dir
+        trades_df.to_csv(os.path.join(output_dir, f"{config.output_prefix}_trading_log.csv"), index=False)
+        portfolio_df.to_csv(os.path.join(output_dir, f"{config.output_prefix}_portfolio_history.csv"), index=False)
+        
+        # Add parameter information to summary
+        param_summary = "\n\nOptimized Parameters:\n" + "="*50 + "\n"
+        for param, value in result_metrics['parameters'].items():
+            param_summary += f"- {param}: {value}\n"
+        
+        with open(os.path.join(output_dir, f"{config.output_prefix}_performance_summary.txt"), 'w') as f:
+            f.write(summary + param_summary)
+        
+        # Generate visualizations
+        visualizer = Plotter(config)
+        visualizer.create_all_charts(trades_df, portfolio_df)
+        
+        print(f"  Saved trading log, portfolio history, summary, and visualizations")
+    
+    def _save_grid_search_summary(self, grid_results: Dict, base_output_dir: str):
+        """Save comprehensive summary of grid search results"""
+        summary_file = os.path.join(base_output_dir, "grid_search_summary.txt")
+        
+        with open(summary_file, 'w') as f:
+            f.write("Grid Search Optimization Summary\n")
+            f.write("=" * 50 + "\n\n")
+            
+            f.write("Grid Search Configuration:\n")
+            f.write("-" * 30 + "\n")
+            for param, values in self.config.grid_search_params.items():
+                f.write(f"- {param}: {values}\n")
+            
+            f.write(f"\nObjectives optimized: {', '.join(self.config.grid_search_objectives)}\n")
+            f.write(f"Total combinations tested: {len(grid_results['param_combinations'])}\n")
+            f.write(f"Successful backtests: {len(grid_results['all_results'])}\n\n")
+            
+            f.write("Best Results by Objective:\n")
+            f.write("-" * 30 + "\n")
+            for objective, best_result in grid_results['best_results'].items():
+                f.write(f"\nBest {objective.upper()}: {best_result[objective]:.4f}\n")
+                f.write("Parameters:\n")
+                for param, value in best_result['parameters'].items():
+                    f.write(f"  - {param}: {value}\n")
+                
+                # Add key performance metrics
+                f.write("Key Metrics:\n")
+                f.write(f"  - Sharpe Ratio: {best_result.get('sharpe_ratio', 0):.3f}\n")
+                f.write(f"  - Total Return: {best_result.get('total_return_pct', 0):.2f}%\n")
+                f.write(f"  - Profit Factor: {best_result.get('profit_factor', 0):.3f}\n")
+                f.write(f"  - Max Drawdown: {best_result.get('max_drawdown_pct', 0):.2f}%\n")
+                f.write(f"  - Win Rate: {best_result.get('win_rate', 0):.2f}%\n")
+        
+        # Save detailed results CSV
+        results_df = pd.DataFrame(grid_results['all_results'])
+        results_df.to_csv(os.path.join(base_output_dir, "grid_search_all_results.csv"), index=False)
+        
+        print(f"Grid search summary saved to {summary_file}")
+        print(f"All results saved to {os.path.join(base_output_dir, 'grid_search_all_results.csv')}")
+
+
+def main(config=None):
+    """Main execution function"""
+    pd.options.mode.chained_assignment = None  # Disable pandas warnings
+    
+    # Create configuration
+    if config is None:
+        config = BacktestConfig()
+    
+    # Load and merge data (only once)
+    data_handler = DataHandler(config)
+    merged_data = data_handler.load_and_merge()
+    
+    # Update config with detected columns
+    config.feature_column = data_handler.feature_column
+    config.price_column = data_handler.price_column
+    
+    # Check if grid search is enabled
+    if config.grid_search_enabled and config.grid_search_params:
+        print("Grid Search Mode Enabled")
+        
+        # Run grid search optimization
+        grid_optimizer = GridSearchOptimizer(config)
+        grid_results = grid_optimizer.run_grid_search(merged_data, config.feature_column, config.price_column)
+        
+        # Save detailed results for best combinations
+        grid_optimizer.save_grid_search_results(grid_results, merged_data, config.feature_column, config.price_column)
+        
+        print(f"\nGrid search completed! Check {config.output_dir} for results.")
+        return grid_results
+    
+    else:
+        print("Single Backtest Mode")
+        
+        # Original single backtest execution
+        # Calibrate position sizing
+        position_manager = PositionManager(config)
+        position_manager.calibrate_sigmoid(merged_data[config.feature_column].values)
+        
+        # Run backtest
+        engine = BacktestEngine(config, merged_data, config.feature_column, config.price_column)
+        trades_df, portfolio_df = engine.run()
+        
+        # Calculate performance
+        analyzer = PerformanceAnalyzer(config)
+        metrics = analyzer.calculate_metrics(trades_df, portfolio_df)
+        summary = analyzer.generate_summary(metrics)
+        
+        # Save results
+        output_dir = config.output_dir
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        
+        trades_df.to_csv(os.path.join(output_dir, f"{config.output_prefix}_trading_log.csv"), index=False)
+        portfolio_df.to_csv(os.path.join(output_dir, f"{config.output_prefix}_portfolio_history.csv"), index=False)
+        
+        with open(os.path.join(output_dir, f"{config.output_prefix}_performance_summary.txt"), 'w') as f:
+            f.write(summary)
+            
+        # Generate visualizations
+        visualizer = Plotter(config)
+        visualizer.create_all_charts(trades_df, portfolio_df)
+    
+    # Run Monte Carlo test if enabled
+    if config.monte_carlo_enabled:
+        print("\n" + "="*60)
+        print("Running Monte Carlo Permutation Test")
+        print("="*60)
+        
+        mc_tester = MonteCarloTester(config)
+        mc_results = mc_tester.run_monte_carlo_test(merged_data, config.monte_carlo_iterations)
+        
+        # Plot results
+        mc_tester.plot_results(mc_results, output_dir, config.output_prefix)
+        
+        # Save results
+        mc_df = pd.DataFrame(mc_results['permutations'])
+        mc_df.to_csv(os.path.join(output_dir, f"{config.output_prefix}_monte_carlo_results.csv"), index=False)
+        
+        # Print summary
+        p_values = mc_results['analysis']['p_values']
+        significant = mc_results['analysis']['significant_metrics']
+        
+        print("\nMonte Carlo Results:")
+        print(f"P-values (vs random chance):")
+        for metric, p_val in p_values.items():
+            sig = "***" if p_val < 0.01 else "**" if p_val < 0.05 else "*" if p_val < 0.1 else ""
+            print(f"  {metric}: {p_val:.3f} {sig}")
+        
+        if significant:
+            print(f"\nStrategy shows significant performance in: {', '.join(significant)}")
+        else:
+            print("\nStrategy does not show statistically significant outperformance.")
+        
+        # Save detailed Monte Carlo analysis
+        analysis_file = os.path.join(output_dir, f"{config.output_prefix}_monte_carlo_analysis.txt")
+        with open(analysis_file, 'w') as f:
+            f.write("Monte Carlo Permutation Test Analysis\n")
+            f.write("=" * 50 + "\n\n")
+            f.write(f"Configuration:\n")
+            f.write(f"- Iterations: {config.monte_carlo_iterations}\n")
+            f.write(f"- Sigmoid Recalibration: Disabled (features fixed in Monte Carlo)\n")
+            f.write(f"- Feature Type: {config.feature_type}\n")
+            f.write(f"- Entry Threshold: {config.entry_threshold}\n")
+            f.write(f"- Exit Threshold: {config.exit_threshold}\n\n")
+            
+            f.write("Original Strategy Performance:\n")
+            f.write("-" * 30 + "\n")
+            for metric, value in mc_results['original'].items():
+                if metric in ['total_return', 'max_drawdown', 'win_rate']:
+                    f.write(f"- {metric.replace('_', ' ').title()}: {value*100:.2f}%\n")
+                elif metric == 'profit_factor':
+                    f.write(f"- Profit Factor: {value:.3f}\n")
+                elif metric == 'sharpe_ratio':
+                    f.write(f"- Sharpe Ratio: {value:.3f}\n")
+                elif metric not in ['sigmoid_midpoint', 'sigmoid_steepness', 'total_return_pct', 
+                                   'max_drawdown_pct', 'annualized_return', 'annualized_return_pct']:
+                    f.write(f"- {metric.replace('_', ' ').title()}: {value:.4f}\n")
+            
+            f.write("\nMonte Carlo Results:\n")
+            f.write("-" * 20 + "\n")
+            f.write(f"- Successful Permutations: {len(mc_results['permutations'])}/{config.monte_carlo_iterations}\n\n")
+            
+            f.write("P-Values (Probability of Random Performance):\n")
+            f.write("-" * 45 + "\n")
+            for metric, p_value in p_values.items():
+                significance = "***" if p_value < 0.01 else "**" if p_value < 0.05 else "*" if p_value < 0.1 else ""
+                f.write(f"- {metric.replace('_', ' ').title()}: {p_value:.4f} {significance}\n")
+            
+            f.write("\n* p < 0.1, ** p < 0.05, *** p < 0.01\n")
+            f.write("Lower p-values indicate better performance than random chance\n\n")
+            
+            f.write(f"\nInterpretation:\n")
+            f.write("-" * 15 + "\n")
+            if significant:
+                f.write(f"Strategy shows statistically significant performance in: {', '.join(significant)}\n")
+            else:
+                f.write("Strategy does not show statistically significant outperformance vs random chance.\n")
+        
+        print(f"Monte Carlo analysis saved to {analysis_file}")
+    
+    # Run Walkforward validation if enabled
+    if config.walkforward_enabled:
+        print("\n" + "="*60)
+        print("Running Walkforward Validation")
+        print("="*60)
+        
+        wf_validator = WalkforwardValidator(config)
+        wf_results = wf_validator.run_walkforward_test(merged_data)
+        
+        if wf_results:
+            # Plot results
+            wf_validator.plot_results(wf_results, output_dir, config.output_prefix)
+            
+            # Save results
+            wf_df = pd.DataFrame(wf_results['windows'])
+            wf_df.to_csv(os.path.join(output_dir, f"{config.output_prefix}_walkforward_results.csv"), index=False)
+            
+            # Print summary
+            analysis = wf_results['analysis']
+            print("\nWalkforward Validation Results:")
+            print(f"Windows tested: {analysis['num_windows']}")
+            print(f"Avg OOS Return: {analysis['avg_oos_return']:.2f}%")
+            print(f"Avg OOS Sharpe: {analysis['avg_oos_sharpe']:.3f}")
+            print(f"Avg OOS Profit Factor: {analysis['avg_oos_profit_factor']:.3f}")
+            print(f"Avg OOS Max Drawdown: {analysis['avg_oos_max_drawdown']:.2f}%")
+            print(f"Avg OOS Win Rate: {analysis['avg_oos_winrate']:.2f}%")
+            print(f"Success Rate: {analysis['positive_return_windows']}/{analysis['num_windows']} "
+                  f"({analysis['positive_return_windows']/analysis['num_windows']*100:.1f}%)")
+            print(f"IS-OOS Return Correlation: {analysis['is_oos_correlation']['return']:.3f}")
+            
+            # Save detailed Walkforward analysis
+            wf_analysis_file = os.path.join(output_dir, f"{config.output_prefix}_walkforward_analysis.txt")
+            with open(wf_analysis_file, 'w') as f:
+                f.write("Walkforward Validation Analysis\n")
+                f.write("=" * 50 + "\n\n")
+                f.write(f"Configuration:\n")
+                f.write(f"- Training Period: {config.walkforward_train} {config.walkforward_period}s\n")
+                f.write(f"- Testing Period: {config.walkforward_test} {config.walkforward_period}s\n")
+                f.write(f"- Step Size: {config.walkforward_step} {config.walkforward_period}(s)\n\n")
+                
+                f.write("Walkforward Results Summary:\n")
+                f.write("-" * 30 + "\n")
+                f.write(f"- Total Windows: {analysis['num_windows']}\n")
+                f.write(f"- Average OOS Return: {analysis['avg_oos_return']:.2f}%\n")
+                f.write(f"- Average OOS Sharpe: {analysis['avg_oos_sharpe']:.3f}\n")
+                f.write(f"- Average OOS Profit Factor: {analysis['avg_oos_profit_factor']:.3f}\n")
+                f.write(f"- Average OOS Max Drawdown: {analysis['avg_oos_max_drawdown']:.2f}%\n")
+                f.write(f"- Average OOS Win Rate: {analysis['avg_oos_winrate']:.2f}%\n")
+                f.write(f"- Positive Return Windows: {analysis['positive_return_windows']}/{analysis['num_windows']} ")
+                f.write(f"({analysis['positive_return_windows']/analysis['num_windows']*100:.1f}%)\n\n")
+                
+                f.write("In-Sample vs Out-of-Sample Correlation:\n")
+                f.write("-" * 40 + "\n")
+                f.write(f"- Return Correlation: {analysis['is_oos_correlation']['return']:.3f}\n")
+                f.write(f"- Sharpe Correlation: {analysis['is_oos_correlation']['sharpe']:.3f}\n")
+                f.write(f"- Profit Factor Correlation: {analysis['is_oos_correlation']['profit_factor']:.3f}\n\n")
+                
+                f.write("Interpretation:\n")
+                f.write("-" * 15 + "\n")
+                pos_return_pct = analysis['positive_return_windows']/analysis['num_windows']*100
+                if pos_return_pct >= 60:
+                    f.write("Strategy shows good consistency with majority of windows profitable.\n")
+                elif pos_return_pct >= 40:
+                    f.write("Strategy shows moderate consistency across different market periods.\n")
+                else:
+                    f.write("Strategy shows poor consistency - may be overfitted to in-sample data.\n")
+                
+                if abs(analysis['is_oos_correlation']['return']) < 0.3:
+                    f.write("Low IS-OOS correlation suggests good robustness and low overfitting.\n")
+                elif abs(analysis['is_oos_correlation']['return']) > 0.7:
+                    f.write("High IS-OOS correlation may indicate some overfitting concerns.\n")
+                else:
+                    f.write("Moderate IS-OOS correlation indicates reasonable strategy robustness.\n")
+            
+            print(f"Walkforward analysis saved to {wf_analysis_file}")
+    
+    # Run Walkforward Monte Carlo test if enabled
+    if config.walkforward_monte_carlo_enabled:
+        print("\n" + "="*60)
+        print("Running Walkforward Monte Carlo Test")
+        print("="*60)
+        
+        wf_mc_tester = WalkforwardMonteCarloTester(config)
+        # Use a smaller number of iterations for walkforward MC (it's computationally intensive)
+        wf_mc_iterations = config.monte_carlo_iterations  # Cap at 100 for performance
+        wf_mc_results = wf_mc_tester.run_walkforward_monte_carlo(merged_data, wf_mc_iterations)
+        
+        if wf_mc_results:
+            # Plot results
+            wf_mc_tester.plot_results(wf_mc_results, output_dir, config.output_prefix)
+            
+            # Save results
+            wf_mc_df = pd.DataFrame(wf_mc_results['permutations'])
+            wf_mc_df.to_csv(os.path.join(output_dir, f"{config.output_prefix}_walkforward_monte_carlo_results.csv"), index=False)
+            
+            # Print summary
+            p_values = wf_mc_results['p_values']
+            significant = [k for k, v in p_values.items() if v < 0.05]
+            
+            print("\nWalkforward Monte Carlo Results:")
+            print(f"P-values (vs random chance):")
+            for metric, p_val in p_values.items():
+                sig = "***" if p_val < 0.01 else "**" if p_val < 0.05 else "*" if p_val < 0.1 else ""
+                print(f"  {metric}: {p_val:.3f} {sig}")
+            
+            if significant:
+                print(f"\nStrategy shows significant performance in: {', '.join(significant)}")
+            else:
+                print("\nStrategy does not show statistically significant outperformance.")
+            
+            # Save detailed Walkforward Monte Carlo analysis
+            analysis_file = os.path.join(output_dir, f"{config.output_prefix}_walkforward_monte_carlo_analysis.txt")
+            with open(analysis_file, 'w') as f:
+                f.write("Walkforward Monte Carlo Test Analysis\n")
+                f.write("=" * 50 + "\n\n")
+                f.write(f"Configuration:\n")
+                f.write(f"- Iterations: {wf_mc_iterations}\n")
+                f.write(f"- Sigmoid Recalibration: Disabled (features fixed in Monte Carlo)\n")
+                f.write(f"- Feature Type: {config.feature_type}\n")
+                f.write(f"- Entry Threshold: {config.entry_threshold} ({config.entry_direction})\n")
+                f.write(f"- Exit Threshold: {config.exit_threshold} ({config.exit_direction})\n\n")
+                
+                f.write("Original Walkforward Performance:\n")
+                f.write("-" * 30 + "\n")
+                original = wf_mc_results['original']
+                f.write(f"- Avg OOS Return: {original['avg_oos_return']:.2f}%\n")
+                f.write(f"- Avg OOS Sharpe: {original['avg_oos_sharpe']:.3f}\n")
+                f.write(f"- Avg OOS Profit Factor: {original['avg_oos_profit_factor']:.3f}\n")
+                f.write(f"- Avg OOS Max Drawdown: {original['avg_oos_max_drawdown']:.2f}%\n")
+                f.write(f"- Avg OOS Win Rate: {original['avg_oos_winrate']:.2f}%\n")
+                f.write(f"- Success Rate: {original['positive_return_windows']}/{original['num_windows']} ")
+                f.write(f"({original['positive_return_windows']/original['num_windows']*100:.1f}%)\n\n")
+                
+                f.write("Walkforward Monte Carlo Results:\n")
+                f.write("-" * 20 + "\n")
+                f.write(f"- Successful Permutations: {wf_mc_results['num_iterations']}/{wf_mc_iterations}\n\n")
+                
+                f.write("P-Values (Probability of Random Performance):\n")
+                f.write("-" * 45 + "\n")
+                for metric, p_value in p_values.items():
+                    significance = "***" if p_value < 0.01 else "**" if p_value < 0.05 else "*" if p_value < 0.1 else ""
+                    f.write(f"- {metric.replace('_', ' ').title()}: {p_value:.4f} {significance}\n")
+                
+                f.write("\n* p < 0.1, ** p < 0.05, *** p < 0.01\n")
+                f.write("Lower p-values indicate better performance than random chance\n\n")
+                
+                f.write(f"\nInterpretation:\n")
+                f.write("-" * 15 + "\n")
+                if significant:
+                    f.write(f"Strategy shows statistically significant performance in: {', '.join(significant)}\n")
+                else:
+                    f.write("Strategy does not show statistically significant outperformance vs random chance.\n")
+            
+            print(f"Walkforward Monte Carlo analysis saved to {analysis_file}")
+    
+    print(f"\nBacktest completed! Results saved to: {output_dir}")
+
+
+if __name__ == "__main__":
+    main() 
