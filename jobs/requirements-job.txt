@@ -1,0 +1,7 @@
+pandas
+yfinance
+pandas-ta
+google-cloud-bigquery
+google-cloud-firestore
+db-dtypes
+pyarrow
