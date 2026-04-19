@@ -7,17 +7,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from contextlib import asynccontextmanager
 
-import copy  # <--- NEW
-import io    # <--- NEW
-
-# --- FIX FOR ADK DEEPCOPY CRASH ---
-# Prevents Python from panicking when ag_ui_adk tries to duplicate 
-# active terminal streams or internal loggers for a new chat session.
-copy._deepcopy_dispatch[io.TextIOWrapper] = lambda x, memo: x
-
-# (Optional safeguard for httpx network locks, which sometimes fail next)
-import threading
-copy._deepcopy_dispatch[type(threading.Lock())] = lambda x, memo: x
+import io   
 
 # 1. Google Agent + MCP tools
 from google import genai
@@ -28,13 +18,6 @@ from google.adk.tools import AgentTool
 from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
 from google.genai import types
 from mcp import StdioServerParameters 
-
-# 2. Frontend & API
-from fastapi import FastAPI, Request
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
-from ag_ui_adk import ADKAgent, add_adk_fastapi_endpoint
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -159,18 +142,13 @@ research_toolset = McpToolset(
     tool_filter=["search_financial_news", "update_macro_data"]
 )
 # 3. Initialize Client in VERTEX AI Mode
-# setting vertexai=True tells the SDK to use your GCP Project Quota & Auth
-#vertex ai
-#client = genai.Client(
-#    vertexai=True,
-#    project=PROJECT_ID,
-#    location=LOCATION
-#)
-
-#Google AI Studio
+# setting vertexai=True tells the SDK to use your GCP Project Quota & Auth vertex ai
 client = genai.Client(
-    api_key=os.getenv("GEMINI_API_KEY")
+    vertexai=True,
+    project=PROJECT_ID,
+    location=LOCATION
 )
+
 
 print(f"✅ Client initialized for Vertex AI Project: {PROJECT_ID}")
 
