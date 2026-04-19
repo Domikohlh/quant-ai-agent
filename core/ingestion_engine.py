@@ -43,10 +43,13 @@ class DataIngestionEngine:
             pass 
         return None
 
-    def calculate_ta(self, df: pd.DataFrame) -> pd.DataFrame:
-        if len(df) < 200:
-            return df
+    def calculate_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Calculates TAs, Permutation Windows, and Triple Barrier Labels."""
+        if len(df) < 300: # Need enough rows for SMA_200 + Perm_72
+            logger.warning("Insufficient data length for feature expansion.")
+            return None
             
+        # 1. Base Technical Indicators
         df.ta.rsi(append=True)
         df.ta.macd(fast=12, slow=26, signal=9, append=True)
         df.ta.macd(fast=10, slow=24, signal=7, append=True)
@@ -58,17 +61,64 @@ class DataIngestionEngine:
         if 'Volume' in df.columns:
             df.ta.vwap(append=True)
 
-        # New technical indicators
-        df.ta.zscore(length=30, append=True)
+        df.ta.zscore(close=df['Close'], length=30, append=True)
         df.ta.ppo(fast=12, slow=26, signal=9, append=True)
         df['pct_rank_20'] = df['Close'].rolling(20).rank(pct=True)
         df.ta.trix(length=30, append=True)
         df.ta.roc(length=10, append=True)
         df.ta.apo(fast=12, slow=26, append=True)
+
+        # 2. Permutation Windows (Feature Expansion)
+        raw_cols = {'timestamp', 'Date', 'Datetime', 'Open', 'High', 'Low', 'Close', 'Volume', 'ticker', 'source', 'pct_rank_20'}
+        tech_indicators = [c for c in df.columns if c not in raw_cols]
+        perm_windows = [1, 3, 6, 12, 24, 36, 48, 72]
+
+        for col in tech_indicators:
+            for w in perm_windows:
+                # Momentum (Acceleration)
+                df[f'{col}_diff_{w}'] = df[col].diff(w)
+                # Volatility (Noise/Stability)
+                df[f'{col}_vol_{w}'] = df[col].rolling(w).std()
+
+        # 3. CRITICAL: Drop historical NaNs caused by the lookbacks (200 + 72)
+        # We must do this BEFORE Triple Barrier so we don't accidentally drop today's data!
+        if df.isna().all().any():
+            df.dropna(axis=1, how='all', inplace=True)
+        df.dropna(inplace=True)
+
+        # 4. Triple Barrier Labeling (Vectorized)
+        df['daily_ret'] = df['Close'].pct_change()
+        df['volatility_20'] = df['daily_ret'].rolling(window=20).std()
+        
+        def apply_triple_barrier(data, horizon, pt=1.5, sl=1.5):
+            target_col = f'target_{horizon}d'
+            upper = data['Close'] * (1 + data['volatility_20'] * pt)
+            lower = data['Close'] * (1 - data['volatility_20'] * sl)
             
+            future_high = data['High'].rolling(window=horizon, min_periods=1).max().shift(-horizon)
+            future_low = data['Low'].rolling(window=horizon, min_periods=1).min().shift(-horizon)
+            future_close = data['Close'].shift(-horizon)
+            
+            hit_upper = future_high >= upper
+            hit_lower = future_low <= lower
+            
+            data[target_col] = 0
+            data.loc[hit_upper & ~hit_lower, target_col] = 1
+            data.loc[hit_lower & ~hit_upper, target_col] = -1
+            
+            both = hit_upper & hit_lower
+            data.loc[both & (future_close > data['Close']), target_col] = 1
+            data.loc[both & (future_close < data['Close']), target_col] = -1
+            return data
+
+        df = apply_triple_barrier(df, horizon=5)
+        df = apply_triple_barrier(df, horizon=10)
+        df.drop(columns=['daily_ret', 'volatility_20'], inplace=True)
+
+        # 5. Downcast to save memory in BigQuery
         float_cols = df.select_dtypes(include=['float64']).columns
         df[float_cols] = df[float_cols].astype('float32')
-        df.dropna(inplace=True)
+
         return df
 
     def update_ticker(self, ticker: str, period: str = "5y", interval: str = "1d") -> pd.DataFrame:
@@ -90,7 +140,7 @@ class DataIngestionEngine:
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
 
-            df = self.calculate_ta(df)
+            df = self.calculate_features(df)
             
             df.reset_index(inplace=True)
             time_col = "Datetime" if "Datetime" in df.columns else "Date"
@@ -140,6 +190,10 @@ class DataIngestionEngine:
             MERGE `{self.full_table_id}` T
             USING `{staging_table_id}` S
             ON T.ticker = S.ticker AND T.timestamp = S.timestamp
+            WHEN MATCHED THEN
+              UPDATE SET 
+                target_5d = S.target_5d,
+                target_10d = S.target_10d
             WHEN NOT MATCHED THEN
               INSERT ROW
         """
