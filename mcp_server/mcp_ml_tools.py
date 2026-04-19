@@ -11,15 +11,20 @@ from fastmcp import FastMCP
 mcp = FastMCP("QuantMLServer")
 
 # Configure your GCP environment
-PROJECT_ID = os.getenv("GCP_PROJECT_ID")
+PROJECT_ID = os.getenv("GCP_PROJECT_ID", "quant-ai-agent-482111")
 DATASET_ID = "market_data"
 TABLE_ID = "historical_data"
 
-def _async_pipeline_worker(job_id: str, target_ticker: str, basket: list):
-    """The background thread that does the heavy lifting."""
+def _async_pipeline_worker(job_id: str, target_ticker: str, basket: list, model_type: str):
+    """The background thread that executes dimensionality reduction and BQML training."""
     bq_client = bigquery.Client(project=PROJECT_ID)
     fs_client = firestore.Client(project=PROJECT_ID)
     
+    # Strict validation: Fallback to XGBoost if the Agent hallucinates
+    allowed_models = ["BOOSTED_TREE_CLASSIFIER", "LOGISTIC_REG"]
+    if model_type not in allowed_models:
+        model_type = "BOOSTED_TREE_CLASSIFIER"
+
     def write_log(status, step, message, metrics=None):
         """Writes the current state directly to Firestore."""
         doc_ref = fs_client.collection("ml_pipeline_logs").document(target_ticker)
@@ -28,6 +33,7 @@ def _async_pipeline_worker(job_id: str, target_ticker: str, basket: list):
             "status": status,
             "step": step,
             "message": message,
+            "model_type": model_type,
             "metrics": metrics or {},
             "updated_at": firestore.SERVER_TIMESTAMP
         }, merge=True)
@@ -56,21 +62,21 @@ def _async_pipeline_worker(job_id: str, target_ticker: str, basket: list):
         X = df[features].fillna(0)
         y = df['target_5d']
         
-        # Correlation Filter
+        # Correlation Filter (Drop highly correlated features)
         corr_matrix = X.corr().abs()
         upper = corr_matrix.where(pd.np.triu(pd.np.ones(corr_matrix.shape), k=1).astype(bool))
         to_drop = [column for column in upper.columns if any(upper[column] > 0.85)]
         X_filtered = X.drop(columns=to_drop)
         
-        # Random Forest Importance
+        # Random Forest Importance Score
         rf = RandomForestClassifier(n_estimators=50, max_depth=5, random_state=42, n_jobs=-1)
         rf.fit(X_filtered, y)
         
         importances = pd.Series(rf.feature_importances_, index=X_filtered.columns)
         top_20_features = importances.nlargest(20).index.tolist()
         
-        # 3. BQML Model Training
-        write_log("RUNNING", "BQML_TRAINING", f"Training XGBoost on top 20 features...")
+        # 3. Dynamic BQML Model Training
+        write_log("RUNNING", "BQML_TRAINING", f"Training {model_type} on top 20 features...")
         model_name = f"{target_ticker}_model_v1"
         model_id = f"{PROJECT_ID}.{DATASET_ID}.{model_name}"
         
@@ -79,7 +85,7 @@ def _async_pipeline_worker(job_id: str, target_ticker: str, basket: list):
         create_model_sql = f"""
             CREATE OR REPLACE MODEL `{model_id}`
             OPTIONS(
-                model_type='BOOSTED_TREE_CLASSIFIER',
+                model_type='{model_type}',
                 input_label_cols=['target_5d'],
                 auto_class_weights=TRUE
             ) AS
@@ -106,13 +112,12 @@ def _async_pipeline_worker(job_id: str, target_ticker: str, basket: list):
         
         if accuracy > 0.50:
             final_status = "SUCCESS_PRIME"
-            msg = f"Model achieved {accuracy:.2%} accuracy and is stored as PRIME."
+            msg = f"{model_type} achieved {accuracy:.2%} accuracy and is stored as PRIME."
         else:
             final_status = "REJECTED"
-            msg = f"Model achieved {accuracy:.2%} accuracy (below 50% threshold). Discarding model."
+            msg = f"{model_type} achieved {accuracy:.2%} accuracy (below 50% threshold). Discarding model."
             bq_client.query(f"DROP MODEL IF EXISTS `{model_id}`").result()
 
-        # Save all metrics to Firestore so the Agent can analyze them
         metrics_dict = {
             "accuracy": float(accuracy),
             "precision": float(precision),
@@ -131,29 +136,32 @@ def _async_pipeline_worker(job_id: str, target_ticker: str, basket: list):
 # --- THE MCP TOOLS ---
 
 @mcp.tool()
-def start_model_pipeline(target_ticker: str, basket_tickers: str) -> str:
+def start_model_pipeline(target_ticker: str, basket_tickers: str, model_type: str = "BOOSTED_TREE_CLASSIFIER") -> str:
     """
     Starts the asynchronous ML training pipeline. Use after confirming basket with user.
+    
+    Args:
+        target_ticker: The primary stock to predict (e.g., 'NVDA').
+        basket_tickers: Comma-separated list of tickers to train on (e.g., 'NVDA,AAPL,MSFT').
+        model_type: The algorithm to use. MUST be either 'BOOSTED_TREE_CLASSIFIER' (for complex/non-linear data [i.e. XGBoost]) or 'LOGISTIC_REG' (for strict linear baseline [i.e. Logistic Regression]).
     """
     basket = [t.strip().upper() for t in basket_tickers.split(",")]
     job_id = f"JOB_{target_ticker}_{uuid.uuid4().hex[:6]}"
     
-    # Initialize the document in Firestore
     fs_client = firestore.Client(project=PROJECT_ID)
     doc_ref = fs_client.collection("ml_pipeline_logs").document(target_ticker)
     doc_ref.set({
         "job_id": job_id,
         "status": "PENDING",
         "step": "INITIALIZING",
-        "message": "Starting background thread...",
+        "message": f"Starting background thread for {model_type}...",
         "updated_at": firestore.SERVER_TIMESTAMP
     })
     
-    # Spawn background thread
-    thread = threading.Thread(target=_async_pipeline_worker, args=(job_id, target_ticker, basket))
+    thread = threading.Thread(target=_async_pipeline_worker, args=(job_id, target_ticker, basket, model_type))
     thread.start()
     
-    return (f"✅ ML Pipeline Started. Job ID: {job_id}.\n"
+    return (f"✅ ML Pipeline Started for {target_ticker} using {model_type}. Job ID: {job_id}.\n"
             f"INSTRUCTION: Tell the user the model is currently training in the background. "
             f"Check status later using the `check_pipeline_logs` tool.")
 
@@ -173,6 +181,7 @@ def check_pipeline_logs(target_ticker: str) -> str:
     status = data.get("status")
     step = data.get("step")
     msg = data.get("message")
+    m_type = data.get("model_type", "Unknown")
     
     if status in ["PENDING", "RUNNING"]:
         return f"⏳ Pipeline Status: {status}\nCurrent Step: {step}\nDetails: {msg}\nInstruction: Inform the user it is still processing."
@@ -180,7 +189,7 @@ def check_pipeline_logs(target_ticker: str) -> str:
     elif status == "SUCCESS_PRIME":
         metrics = data.get("metrics", {})
         return (f"✅ Pipeline Status: {status}\n"
-                f"Model successfully saved as PRIME (Accuracy > 50%).\n"
+                f"Model ({m_type}) successfully saved as PRIME.\n"
                 f"--- Evaluation Metrics ---\n"
                 f"Accuracy:  {metrics.get('accuracy', 0):.2%}\n"
                 f"Precision: {metrics.get('precision', 0):.2%}\n"
@@ -188,17 +197,17 @@ def check_pipeline_logs(target_ticker: str) -> str:
                 f"F1 Score:  {metrics.get('f1_score', 0):.4f}\n"
                 f"ROC AUC:   {metrics.get('roc_auc', 0):.4f}\n"
                 f"Features Used: {len(metrics.get('features_used', []))}\n"
-                f"Instruction: Present these metrics to the user. Provide a strict quantitative analysis emphasizing Precision (false positive rate) and F1 Score. Advise the user on whether this model is actually safe to trade, or if it generates too much noise despite passing the baseline accuracy filter.")
+                f"Instruction: Present these metrics to the user. Provide a strict quantitative analysis emphasizing Precision and F1 Score.")
                 
     elif status == "REJECTED":
         metrics = data.get("metrics", {})
         return (f"❌ Pipeline Status: {status}\n"
-                f"Model was REJECTED (Failed 50% accuracy threshold).\n"
+                f"Model ({m_type}) was REJECTED (Failed 50% accuracy threshold).\n"
                 f"--- Evaluation Metrics ---\n"
                 f"Accuracy:  {metrics.get('accuracy', 0):.2%}\n"
                 f"Precision: {metrics.get('precision', 0):.2%}\n"
                 f"Recall:    {metrics.get('recall', 0):.2%}\n"
-                f"Instruction: Inform the user the model failed the baseline mathematical filter and was safely discarded. Suggest trying a completely different basket of tickers.")
+                f"Instruction: Inform the user the model failed the baseline filter and was discarded. Suggest trying a different basket or a different algorithm.")
                 
     else:
         return f"⚠️ Pipeline Status: {status}\nError Details: {msg}"
