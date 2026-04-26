@@ -61,13 +61,36 @@ Solves the path-dependency problem of financial time-series forecasting.
 ---
 
 ## Phase 2: Machine Learning & MLOps (BQML)
-*Status: Pending Implementation*
+*Status: Implemented (Asynchronous MCP Pipeline)*
 
-Focuses on dynamically reducing dimensionality and utilizing BigQuery ML to train predictive models (e.g., Boosted Trees/XGBoost) directly where the data resides.
+Phase 2 focuses on dynamically reducing the dimensionality of the "Alpha Vault" (Phase 1) and utilizing BigQuery ML (BQML) to train predictive multi-class classification models directly where the data resides. To prevent LLM context timeouts and support stateless deployments, the entire ML training loop is heavily decoupled into an asynchronous, "Fire-and-Forget" architecture.
 
-1. **Agentic Orchestration:** An AI Agent acts as the intelligent trigger, translating user requests for specific stock baskets into ML workflows.
-2. **Dynamic Feature Selection:** A Python tool pulls the specific requested basket from the Alpha Vault, applies Correlation Clustering and Random Forest Importance, and aggressively prunes the 400+ columns down to the top regime-stable, cross-asset features.
-3. **In-Database Training:** The Agent constructs a BQML `CREATE MODEL` statement using only the optimal features, executing model training with zero data egress.
+### 2.1 Agentic Orchestration (FastMCP)
+The AI Agent acts as the intelligent orchestrator, interacting with a dedicated Model Context Protocol (MCP) server. To accommodate the heavy compute time of machine learning without freezing the Agent, the pipeline relies on two distinct tools:
+1. **`start_model_pipeline` (Asynchronous Trigger):** The Agent submits a Human-In-The-Loop (HITL) approved basket of tickers and the desired algorithm. The tool spawns a background Python thread and instantly returns a `Job ID` to the Agent, freeing the LLM to continue chatting with the user.
+2. **`check_pipeline_logs` (State Reader):** The Agent can dynamically query this tool to read the real-time processing state (e.g., "Downloading", "Training", "Completed") or retrieve the final evaluation metrics.
+
+### 2.2 Dynamic Dimensionality Reduction
+Because the predictive power of technical features shifts drastically depending on the specific combination of tickers in a basket, feature selection cannot be pre-calculated. It is executed dynamically in Python memory at training time:
+* **Target Basket Extraction:** The background thread pulls the ~432 features specifically for the requested tickers.
+* **Correlation Clustering:** Drops highly collinear features (Pearson correlation > 0.85) to reduce noise.
+* **Random Forest Importance:** Fits a fast Random Forest Classifier against the `target_5d` labels to identify the cross-asset regime-stable features, aggressively pruning the dataset down to the Top 20 most impactful columns.
+
+### 2.3 Zero-Egress BQML Training
+Once the Top 20 features are identified, the Python thread constructs a dynamic BQML `CREATE MODEL` SQL statement. The model is trained directly inside BigQuery, eliminating massive data egress costs.
+* **Algorithm Constraints:** To prevent LLM hallucination and ensure mathematical compatibility with Triple Barrier discrete targets, the Agent is strictly restricted to two institutional baselines:
+  * `BOOSTED_TREE_CLASSIFIER` (XGBoost): The default heavy lifter for capturing complex, non-linear market interactions.
+  * `LOGISTIC_REG` (Penalized Logistic Regression): The strict linear baseline used to test if complex models are simply overfitting noise.
+
+### 2.4 Automated Evaluation & "PRIME" Promotion
+Following training, the background thread automatically executes `ML.EVALUATE` and applies rigid quantitative gating before allowing a model into production.
+* **The Mathematical Bouncer:** The model must achieve a baseline **Accuracy > 50%**. Because the Triple Barrier labels include a heavy class imbalance of `0` (sideways market), any model below 50% is deemed mathematically blind and is instantly dropped via a SQL `DROP MODEL` command.
+* **Secondary Analysis:** If the model passes, it is saved to BigQuery as a `PRIME` model. The pipeline extracts the **Precision, Recall, F1 Score, and ROC AUC**. The Agent uses these advanced metrics to advise the user on the model's true trading viability (e.g., identifying models that pass the accuracy filter but have a dangerously low precision/high false-positive rate).
+
+### 2.5 Stateless Logging Architecture (Firestore)
+To support deployment on ephemeral environments like Vertex AI Agent Engine, local file logging is entirely abandoned. 
+* The pipeline utilizes **Google Cloud Firestore** as a real-time state machine. 
+* Logs are written to `document(target_ticker)` rather than by Job ID. This overwrite design natively tracks the status of the ML pipeline across disconnected SSE or Stdio connections while keeping database storage costs near absolute zero.
 
 --- 
 

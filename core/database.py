@@ -5,9 +5,6 @@ import logging
 import sys
 
 from google.cloud import bigquery, firestore, storage
-from google.cloud.sql.connector import Connector
-import sqlalchemy
-from sqlalchemy import text
 import joblib
 
 # Need to remove the Cloud SQL running, instead, use firestore and bigquery 

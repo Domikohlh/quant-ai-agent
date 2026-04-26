@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 import pandas as pd
 from dotenv import load_dotenv
+import gc
 
 load_dotenv()
 
@@ -54,21 +55,33 @@ def main():
     
     logger.info(f"🚀 Starting daily data ingestion for {len(universe)} tickers...")
     
-    all_dataframes = []
+    batch_size = 10  # Upload 10 tickers at a time to avoid OOM
+    current_batch = []
 
-    # 1. Collect all data locally in Python
-    for ticker in universe:
-        df = engine.update_ticker(ticker=ticker, period="5y", interval="1d")
-        if df is not None and not df.empty:
-            all_dataframes.append(df)
+    for i, ticker in enumerate(universe):
+        try:
+            df = engine.update_ticker(ticker=ticker, period="5y", interval="1d")
+            if df is not None and not df.empty:
+                current_batch.append(df)
+        except Exception as e:
+            logger.error(f"Failed to fetch {ticker}: {e}")
             
-    # 2. Stitch together and Upload in one BATCH
-    if all_dataframes:
-        master_df = pd.concat(all_dataframes, ignore_index=True)
-        engine.upload_batch(master_df)
-    else:
-        logger.info("No new data to upload across the universe.")
-        
+        # Trigger upload when batch is full OR on the last ticker
+        is_last_ticker = (i == len(universe) - 1)
+        if len(current_batch) >= batch_size or (is_last_ticker and current_batch):
+            logger.info(f"Uploading batch ending at ticker {ticker}...")
+            
+            # Concat only the small batch
+            batch_df = pd.concat(current_batch, ignore_index=True)
+            
+            # Upload to BQ (ensure your upload function uses WRITE_APPEND)
+            engine.upload_batch(batch_df)
+            
+            # CRITICAL: Free memory aggressively
+            del batch_df
+            current_batch.clear()
+            gc.collect() 
+            
     logger.info("✅ Daily ingestion job complete.")
 
 if __name__ == "__main__":

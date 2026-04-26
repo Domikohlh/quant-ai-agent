@@ -3,6 +3,8 @@ yfinance
 pandas-ta
 google-cloud-bigquery
 google-cloud-firestore
+google-cloud-storage
+joblib
 db-dtypes
 pyarrow
 python-dotenv
