@@ -21,7 +21,7 @@ ib_logs/
 # Local .terraform directories
 **/.terraform/*
 
-# .tfstate files
+# .tfstate files (These contain sensitive infrastructure state!)
 *.tfstate
 *.tfstate.*
 
@@ -29,5 +29,10 @@ ib_logs/
 crash.log
 crash.*.log
 
-# Ignore any .tfvars files (This protects your project ID!)
+# Ignore variable files containing actual sensitive values
 *.tfvars
+*.tfvars.json
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json

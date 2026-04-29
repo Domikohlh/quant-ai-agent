@@ -1,0 +1,20 @@
+# Use the official lightweight Python image
+FROM python:3.12-slim
+
+# Allow statements and log messages to immediately appear in the Knative logs
+ENV PYTHONUNBUFFERED=1
+
+# Set the working directory
+WORKDIR /app
+
+# Copy the requirements file and install dependencies
+# Note: Ensure ccxt and pandas-gbq are in your requirements-job.txt
+COPY jobs/requirements-job.txt .
+RUN pip install --no-cache-dir -r requirements-job.txt
+
+# Copy the core modules and the job script
+COPY core/ /app/core/
+COPY jobs/hourly_crypto_ingestion.py /app/jobs/
+
+# Command to run the job
+CMD ["python", "jobs/hourly_crypto_ingestion.py"]

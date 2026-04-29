@@ -1,139 +1,151 @@
 # infra/main.tf
-
 terraform {
   required_providers {
     google = {
       source  = "hashicorp/google"
-      version = ">= 5.0"
+      version = "7.23.0"
     }
   }
 }
-
-# ---------------------------------------------------------
-# 1. PROVIDER
-# ---------------------------------------------------------
 
 provider "google" {
-  project = var.project_id 
-  region  = "us-central1"
-  zone    = "us-central1-a"
+  project = var.project_id
+  region  = var.region
 }
 
-# Enable necessary APIs automatically
-resource "google_project_service" "enabled_apis" {
-  for_each = toset([
-    "run.googleapis.com",
-    "cloudscheduler.googleapis.com",
-    "iam.googleapis.com",
-    "artifactregistry.googleapis.com",
-    "firestore.googleapis.com", 
-    "bigquery.googleapis.com"
-  ])
-  service            = each.key
-  disable_on_destroy = false
+# =====================================================================
+# COMMON RESOURCES (Shared across pipelines)
+# =====================================================================
+
+# The service account used purely by Cloud Scheduler to click the "Run" button
+# We keep this entirely separate from the BigQuery data ingestion identity.
+resource "google_service_account" "scheduler_trigger_sa" {
+  account_id   = "scheduler-trigger-sa"
+  display_name = "Cloud Scheduler Trigger SA"
 }
 
-# ---------------------------------------------------------
-# 2. SERVICE ACCOUNTS & IAM
-# ---------------------------------------------------------
+# =====================================================================
+# PIPELINE 1: EQUITIES (DAILY)
+# =====================================================================
 
-# Service Account for Cloud Run (The Agents)
-resource "google_service_account" "agent_sa" {
-  account_id   = "quant-agent-sa"
-  display_name = "Quant Agent Cloud Run Service Account"
-}
-
-# Allow Scheduler to invoke Cloud Run
-resource "google_cloud_run_v2_service_iam_member" "scheduler_invoker" {
-  project  = google_cloud_run_v2_service.agent_service.project
-  location = google_cloud_run_v2_service.agent_service.location
-  name     = google_cloud_run_v2_service.agent_service.name
-  role     = "roles/run.invoker"
-  member   = "serviceAccount:${google_service_account.agent_sa.email}"
-}
-
-# ---------------------------------------------------------
-# 3. FIRESTORE DATABASE (Serverless State)
-# ---------------------------------------------------------
-
-resource "google_firestore_database" "default" {
-  project     = var.project_id
-  name        = "(default)"
-  location_id = "us-central1"
-  type        = "FIRESTORE_NATIVE"
-}
-
-# ---------------------------------------------------------
-# 4. CLOUD RUN (The Agent Engine)
-# ---------------------------------------------------------
-
-resource "google_cloud_run_v2_service" "agent_service" {
-  name     = "quant-ai-agent-service"
-  location = "us-central1"
-  ingress  = "INGRESS_TRAFFIC_ALL"
+resource "google_cloud_run_v2_job" "equities_job" {
+  name     = "quant-daily-ingestion"
+  location = var.region
 
   template {
-    containers {
-      # Replace this with your actual Docker image URI when you build it
-      image = "us-docker.pkg.dev/cloudrun/container/hello"
-      
-      resources {
-        limits = {
-          cpu    = "1000m"
-          memory = "1Gi"
+    template {
+      # Direct variable reference to your existing Service Account
+      service_account = var.data_engine_sa_email
+
+      containers {
+        image = "${var.region}-docker.pkg.dev/${var.project_id}/quant-repo/daily-ingestion:${var.equities_image_tag}"
+
+        env {
+          name  = "GCP_PROJECT_ID"
+          value = var.project_id
+        }
+
+        env {
+          name  = "GCP_COMPUTE_REGION"
+          value = var.region
+        }
+
+        resources {
+          limits = {
+            cpu    = "1"
+            memory = "1Gi"
+          }
         }
       }
-      
-      env {
-        name  = "GCP_PROJECT_ID"
-        value = var.project_id
+      timeout = "1800s" # 30 mins
+    }
+  }
+}
+
+resource "google_cloud_run_v2_job_iam_member" "equities_scheduler_invoker" {
+  project  = google_cloud_run_v2_job.equities_job.project
+  location = google_cloud_run_v2_job.equities_job.location
+  name     = google_cloud_run_v2_job.equities_job.name
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${google_service_account.scheduler_trigger_sa.email}"
+}
+
+resource "google_cloud_scheduler_job" "equities_scheduler" {
+  name        = "trigger-daily-ingestion"
+  description = "Runs M-F at 6:00 PM NYC time"
+  schedule    = "0 18 * * 1-5"
+  time_zone   = "America/New_York"
+
+  http_target {
+    http_method = "POST"
+    uri         = "https://${var.region}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${var.project_id}/jobs/${google_cloud_run_v2_job.equities_job.name}:run"
+
+    oauth_token {
+      service_account_email = google_service_account.scheduler_trigger_sa.email
+    }
+  }
+  depends_on = [google_cloud_run_v2_job_iam_member.equities_scheduler_invoker]
+}
+
+# =====================================================================
+# PIPELINE 2: CRYPTO (HOURLY)
+# =====================================================================
+
+resource "google_cloud_run_v2_job" "crypto_job" {
+  name     = "quant-crypto-hourly-ingestion"
+  location = var.region
+
+  template {
+    template {
+      # Reusing the exact same identity for BigQuery write access
+      service_account = var.data_engine_sa_email
+
+      containers {
+        image = "${var.region}-docker.pkg.dev/${var.project_id}/quant-repo/crypto-ingestion:${var.crypto_image_tag}"
+
+        env {
+          name  = "GCP_PROJECT_ID"
+          value = var.project_id
+        }
+
+        env {
+          name  = "GCP_COMPUTE_REGION"
+          value = var.region
+        }
+
+        resources {
+          limits = {
+            cpu    = "1"
+            memory = "1Gi"
+          }
+        }
       }
-    }
-    
-    service_account = google_service_account.agent_sa.email
-  }
-}
-
-# ---------------------------------------------------------
-# 5. CLOUD SCHEDULER (The Triggers)
-# ---------------------------------------------------------
-
-# Job A: ACTIVE MODE (Market Hours) - Every 15 mins
-resource "google_cloud_scheduler_job" "active_mode" {
-  name             = "quant-active-mode-trigger"
-  description      = "Triggers agent every 15 mins during US market hours"
-  schedule         = "*/15 9-16 * * 1-5" # 9:00 AM to 4:59 PM ET, Mon-Fri
-  time_zone        = "America/New_York"
-  attempt_deadline = "320s"
-
-  http_target {
-    http_method = "POST"
-    uri         = google_cloud_run_v2_service.agent_service.uri
-    
-    body = base64encode("{\"mode\": \"active\"}")
-
-    oidc_token {
-      service_account_email = google_service_account.agent_sa.email
+      timeout = "600s" # 10 mins
     }
   }
 }
 
-# Job B: EFFICIENT MODE (Night Shift) - Hourly
-resource "google_cloud_scheduler_job" "efficient_mode" {
-  name             = "quant-efficient-mode-trigger"
-  description      = "Triggers sentinel check hourly outside market hours"
-  schedule         = "0 17-23,0-8 * * *" # 5 PM to 8 AM ET
-  time_zone        = "America/New_York"
-  attempt_deadline = "320s"
+resource "google_cloud_run_v2_job_iam_member" "crypto_scheduler_invoker" {
+  project  = google_cloud_run_v2_job.crypto_job.project
+  location = google_cloud_run_v2_job.crypto_job.location
+  name     = google_cloud_run_v2_job.crypto_job.name
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${google_service_account.scheduler_trigger_sa.email}"
+}
+
+resource "google_cloud_scheduler_job" "crypto_scheduler" {
+  name        = "trigger-hourly-crypto-ingestion"
+  description = "Runs at minute 2 of every hour"
+  schedule    = "2 * * * *"
+  time_zone   = "UTC"
 
   http_target {
     http_method = "POST"
-    uri         = google_cloud_run_v2_service.agent_service.uri
-    
-    body = base64encode("{\"mode\": \"monitoring\"}")
+    uri         = "https://${var.region}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${var.project_id}/jobs/${google_cloud_run_v2_job.crypto_job.name}:run"
 
-    oidc_token {
-      service_account_email = google_service_account.agent_sa.email
+    oauth_token {
+      service_account_email = google_service_account.scheduler_trigger_sa.email
     }
   }
+  depends_on = [google_cloud_run_v2_job_iam_member.crypto_scheduler_invoker]
 }

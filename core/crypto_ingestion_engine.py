@@ -124,7 +124,7 @@ class CryptoIngestionEngine:
 
     def fetch_binance_data(self, symbol: str, timeframe: str = '1h', since_ts: int = None, limit: int = 1000) -> pd.DataFrame:
         """Pulls OHLCV data from CCXT."""
-        exchange = ccxt.binance({'enableRateLimit': True})
+        exchange = ccxt.binanceus({'enableRateLimit': True})
         all_ohlcv = []
         
         while True:

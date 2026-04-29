@@ -1,0 +1,5 @@
+steps:
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['build', '-f', 'jobs/Dockerfile.cryptoingest', '-t', 'us-central1-docker.pkg.dev/quant-ai-agent-482111/quant-repo/crypto-ingestion:latest', '.']
+images:
+- 'us-central1-docker.pkg.dev/quant-ai-agent-482111/quant-repo/crypto-ingestion:latest'

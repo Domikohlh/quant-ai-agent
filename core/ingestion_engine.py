@@ -13,7 +13,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger("IngestionEngine")
 
 class DataIngestionEngine:
-    def __init__(self, db_manager: DatabaseManager, dataset_id="market_data", table_name="historical_data"): # <-- Name changed here
+    def __init__(self, db_manager: DatabaseManager, dataset_id="market_data", table_name="historical_data"): 
         self.db = db_manager
         self.dataset_id = dataset_id
         self.table_name = table_name 
