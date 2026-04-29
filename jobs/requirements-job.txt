@@ -8,3 +8,4 @@ joblib
 db-dtypes
 pyarrow
 python-dotenv
+ccxt
