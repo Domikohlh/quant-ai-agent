@@ -141,10 +141,12 @@ resource "google_cloud_scheduler_job" "crypto_scheduler" {
 
   http_target {
     http_method = "POST"
+    # Ensure the URI matches the Cloud Run Job Run endpoint
     uri         = "https://${var.region}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${var.project_id}/jobs/${google_cloud_run_v2_job.crypto_job.name}:run"
 
-    oauth_token {
+    oidc_token {
       service_account_email = google_service_account.scheduler_trigger_sa.email
+      audience              = "https://${var.region}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/${var.project_id}/jobs/${google_cloud_run_v2_job.crypto_job.name}:run"
     }
   }
   depends_on = [google_cloud_run_v2_job_iam_member.crypto_scheduler_invoker]
