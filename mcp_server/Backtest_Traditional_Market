@@ -1,0 +1,575 @@
+import numpy as np
+import pandas as pd
+from numba import njit
+from sklearn.ensemble import RandomForestRegressor
+from scipy.stats import spearmanr
+
+
+# ======================
+# CONFIG
+# ======================
+TOP_K = 5
+REB_FREQ = 5
+TRANSACTION_COST = 0.00025
+INITIAL_CAPITAL = 1_000_000
+
+LOOKBACK = 252
+HORIZON = 5
+
+TARGET_VOL = 0.15
+MAX_LEVERAGE = 2.0
+VOL_LOOKBACK = 20
+TURNOVER_LIMIT = 1.0
+
+
+# ======================
+# 1. WALK-FORWARD MODEL
+# ======================
+def walk_forward_predictions(df):
+    """
+    PURPOSE:
+    Train model in a walk-forward way to avoid lookahead bias.
+
+    This tells you:
+    "Can today's features predict future returns?"
+    """
+
+    df = df.copy()
+    df = df.sort_values(["ticker", "date"])
+
+    # Predict future return, not today's return
+    df["target_return"] = df.groupby("ticker")["return"].shift(-HORIZON)
+    df = df.dropna(subset=["target_return"])
+
+    dates = df["date"].unique()
+    results = []
+
+    feature_cols = [
+        col for col in df.columns
+        if col not in ["date", "ticker", "return", "target_return"]
+    ]
+
+    for i in range(LOOKBACK, len(dates)):
+
+        train_dates = dates[i - LOOKBACK:i]
+        test_date = dates[i]
+
+        train_df = df[df["date"].isin(train_dates)]
+        test_df = df[df["date"] == test_date].copy()
+
+        X_train = train_df[feature_cols]
+        y_train = train_df["target_return"]
+
+        X_test = test_df[feature_cols]
+
+        model = RandomForestRegressor(
+            n_estimators=300,
+            max_depth=6,
+            min_samples_leaf=20,
+            random_state=42,
+            n_jobs=-1
+        )
+
+        model.fit(X_train, y_train)
+
+        test_df["prediction"] = model.predict(X_test)
+
+        # Confidence proxy:
+        # stronger absolute prediction = higher confidence
+        test_df["confidence"] = test_df["prediction"].abs().rank(pct=True)
+
+        results.append(
+            test_df[
+                [
+                    "date",
+                    "ticker",
+                    "prediction",
+                    "confidence",
+                    "return",
+                    "target_return",
+                ]
+            ]
+        )
+
+    return pd.concat(results, ignore_index=True)
+
+
+# ======================
+# 2. PORTFOLIO CONSTRUCTION
+# ======================
+def construct_portfolio(preds, confidence, threshold=0.6):
+    """
+    Cross-sectional long-short portfolio.
+
+    Logic:
+    1. Filter by confidence
+    2. Rank predictions
+    3. Long top K
+    4. Short bottom K
+
+    This is a classic factor portfolio.
+    """
+
+    valid = confidence >= threshold
+    preds = preds[valid]
+
+    weights = pd.Series(0.0, index=confidence.index)
+
+    if len(preds) < TOP_K * 2:
+        return weights
+
+    ranked = preds.sort_values()
+
+    long_assets = ranked.tail(TOP_K).index
+    short_assets = ranked.head(TOP_K).index
+
+    # Dollar neutral:
+    # Long side = +100%
+    # Short side = -100%
+    weights.loc[long_assets] = 1.0 / TOP_K
+    weights.loc[short_assets] = -1.0 / TOP_K
+
+    return weights
+
+
+# ======================
+# 3. TURNOVER CONTROL
+# ======================
+def apply_turnover_control(new_w, old_w, turnover_limit=TURNOVER_LIMIT):
+    """
+    Prevent portfolio from changing too aggressively.
+
+    This tells you:
+    "Is my alpha being destroyed by trading too much?"
+    """
+
+    turnover = np.abs(new_w - old_w).sum()
+
+    if turnover <= turnover_limit:
+        return new_w
+
+    adjustment = new_w - old_w
+    scaled_adjustment = adjustment * (turnover_limit / turnover)
+
+    return old_w + scaled_adjustment
+
+
+# ======================
+# 4. VOLATILITY TARGETING
+# ======================
+def apply_vol_target(weights, returns_window):
+    """
+    Scale exposure based on recent realised volatility.
+
+    This tells you:
+    "Am I taking too much or too little risk?"
+
+    If realised vol is high:
+    → reduce exposure
+
+    If realised vol is low:
+    → increase exposure
+    """
+
+    if len(returns_window) < 5:
+        return weights
+
+    port_rets = returns_window @ weights
+
+    realised_vol = np.std(port_rets) * np.sqrt(252)
+
+    if realised_vol <= 0 or np.isnan(realised_vol):
+        return weights
+
+    scale = TARGET_VOL / realised_vol
+    scale = min(scale, MAX_LEVERAGE)
+
+    return weights * scale
+
+
+# ======================
+# 5. NUMBA BACKTEST ENGINE
+# ======================
+@njit
+def numba_alpha_backtest(returns, weights, cost):
+    """
+    Fast portfolio simulation.
+
+    Tracks:
+    - equity curve
+    - strategy returns
+    - turnover
+    - transaction costs
+    - max drawdown
+    """
+
+    T, N = returns.shape
+
+    equity = INITIAL_CAPITAL
+    peak = equity
+    max_dd = 0.0
+
+    equity_curve = np.zeros(T)
+    strategy_returns = np.zeros(T)
+    turnover_series = np.zeros(T)
+    cost_series = np.zeros(T)
+
+    prev_w = np.zeros(N)
+
+    for t in range(T):
+
+        w = weights[t]
+
+        port_ret = 0.0
+        for i in range(N):
+            port_ret += w[i] * returns[t, i]
+
+        turnover = 0.0
+        for i in range(N):
+            turnover += abs(w[i] - prev_w[i])
+
+        cost_t = turnover * cost
+        net_ret = port_ret - cost_t
+
+        equity = equity * (1.0 + net_ret)
+
+        equity_curve[t] = equity
+        strategy_returns[t] = net_ret
+        turnover_series[t] = turnover
+        cost_series[t] = cost_t
+
+        prev_w = w.copy()
+
+        if equity > peak:
+            peak = equity
+
+        dd = (peak - equity) / peak
+
+        if dd > max_dd:
+            max_dd = dd
+
+    return equity_curve, strategy_returns, turnover_series, cost_series, max_dd
+
+
+# ======================
+# 6. ALPHA BACKTEST
+# ======================
+def run_alpha_backtest(pred_df, confidence_threshold=0.6):
+    """
+    Convert ML predictions into a tradable alpha portfolio.
+
+    Improvements:
+    1. Long-short top K / bottom K
+    2. Volatility targeting
+    3. Turnover control
+    4. Transaction cost tracking
+    5. Drawdown tracking
+    """
+
+    df = pred_df.copy()
+    df = df.sort_values(["date", "ticker"])
+
+    dates = df["date"].unique()
+    tickers = df["ticker"].unique()
+
+    T = len(dates)
+    N = len(tickers)
+
+    returns_matrix = np.zeros((T, N))
+    weights_matrix = np.zeros((T, N))
+
+    ticker_to_idx = {ticker: i for i, ticker in enumerate(tickers)}
+
+    # Build return matrix
+    for t_idx, date in enumerate(dates):
+
+        slice_df = df[df["date"] == date]
+
+        for _, row in slice_df.iterrows():
+            i = ticker_to_idx[row["ticker"]]
+            returns_matrix[t_idx, i] = row["return"]
+
+    prev_w = np.zeros(N)
+
+    # Rebalance loop
+    for t_idx, date in enumerate(dates):
+
+        if t_idx % REB_FREQ != 0:
+            weights_matrix[t_idx] = prev_w
+            continue
+
+        slice_df = df[df["date"] == date]
+
+        preds = slice_df.set_index("ticker")["prediction"]
+        confidence = slice_df.set_index("ticker")["confidence"]
+
+        raw_weights = construct_portfolio(
+            preds,
+            confidence,
+            threshold=confidence_threshold
+        )
+
+        w_vec = np.zeros(N)
+
+        for ticker, weight in raw_weights.items():
+            if ticker in ticker_to_idx:
+                w_vec[ticker_to_idx[ticker]] = weight
+
+        # Apply volatility targeting
+        start = max(0, t_idx - VOL_LOOKBACK)
+        returns_window = returns_matrix[start:t_idx]
+
+        w_vec = apply_vol_target(w_vec, returns_window)
+
+        # Apply turnover control
+        w_vec = apply_turnover_control(
+            w_vec,
+            prev_w,
+            turnover_limit=TURNOVER_LIMIT
+        )
+
+        weights_matrix[t_idx] = w_vec
+        prev_w = w_vec.copy()
+
+    equity_curve, strategy_returns, turnover, costs, max_dd = numba_alpha_backtest(
+        returns_matrix,
+        weights_matrix,
+        TRANSACTION_COST
+    )
+
+    bt_df = pd.DataFrame({
+        "date": dates,
+        "equity": equity_curve,
+        "strategy_return": strategy_returns,
+        "turnover": turnover,
+        "transaction_cost": costs
+    })
+
+    return {
+        "bt_df": bt_df,
+        "weights_matrix": weights_matrix,
+        "tickers": tickers,
+        "equity_curve": equity_curve,
+        "strategy_returns": strategy_returns,
+        "max_drawdown_%": max_dd * 100
+    }
+
+
+# ======================
+# 7. INFORMATION COEFFICIENT
+# ======================
+def compute_ic(pred_df):
+    """
+    IC = Spearman rank correlation between prediction and future return.
+
+    This tells you:
+    "Are your predictions correctly ranking assets?"
+
+    Interpretation:
+    - IC ≈ 0     → no predictive power
+    - IC > 0     → useful signal
+    - IC < 0     → inverse signal, consider flipping it
+
+    Real signals typically have:
+    IC ≈ 2%–5%, or 0.02–0.05.
+    """
+
+    ic_series = []
+
+    for date, group in pred_df.groupby("date"):
+
+        if len(group) < 5:
+            continue
+
+        ic, _ = spearmanr(
+            group["prediction"],
+            group["target_return"]
+        )
+
+        ic_series.append({
+            "date": date,
+            "IC": ic
+        })
+
+    return pd.DataFrame(ic_series)
+
+
+# ======================
+# 8. IC DECAY
+# ======================
+def compute_ic_decay(pred_df, max_horizon=10):
+    """
+    Measures how signal strength decays over time.
+
+    This tells you:
+    "Does your signal predict 1-day, 5-day, 10-day returns?"
+
+    Interpretation:
+    - Fast decay → short-term alpha
+    - Slow decay → medium-term alpha
+    """
+
+    df = pred_df.copy()
+    df = df.sort_values(["ticker", "date"])
+
+    decay_results = {}
+
+    for h in range(1, max_horizon + 1):
+
+        df[f"return_fwd_{h}"] = (
+            df.groupby("ticker")["return"]
+            .shift(-h)
+        )
+
+        ic_list = []
+
+        for date, group in df.groupby("date"):
+
+            group = group.dropna(subset=[f"return_fwd_{h}"])
+
+            if len(group) < 5:
+                continue
+
+            ic, _ = spearmanr(
+                group["prediction"],
+                group[f"return_fwd_{h}"]
+            )
+
+            ic_list.append(ic)
+
+        decay_results[h] = np.nanmean(ic_list)
+
+    return pd.Series(decay_results, name="IC_decay")
+
+
+# ======================
+# 9. PERFORMANCE METRICS
+# ======================
+def compute_performance_metrics(bt_df):
+    """
+    Converts backtest results into fund-style metrics.
+
+    This tells you:
+    - Did the strategy make money?
+    - Was the return worth the risk?
+    - How bad was the drawdown?
+    - Did costs hurt the alpha?
+    """
+
+    returns = bt_df["strategy_return"].dropna()
+
+    final_equity = bt_df["equity"].iloc[-1]
+    total_return = final_equity / INITIAL_CAPITAL - 1
+
+    ann_return = (1 + total_return) ** (252 / len(bt_df)) - 1
+    ann_vol = returns.std() * np.sqrt(252)
+
+    sharpe = ann_return / ann_vol if ann_vol != 0 else np.nan
+
+    downside_returns = returns[returns < 0]
+    downside_vol = downside_returns.std() * np.sqrt(252)
+
+    sortino = ann_return / downside_vol if downside_vol != 0 else np.nan
+
+    rolling_peak = bt_df["equity"].cummax()
+    drawdown = bt_df["equity"] / rolling_peak - 1
+    max_drawdown = drawdown.min()
+
+    calmar = ann_return / abs(max_drawdown) if max_drawdown != 0 else np.nan
+
+    return {
+        "final_equity": final_equity,
+        "total_return_%": total_return * 100,
+        "annual_return_%": ann_return * 100,
+        "annual_vol_%": ann_vol * 100,
+        "sharpe": sharpe,
+        "sortino": sortino,
+        "max_drawdown_%": max_drawdown * 100,
+        "calmar": calmar,
+        "avg_turnover": bt_df["turnover"].mean(),
+        "avg_transaction_cost": bt_df["transaction_cost"].mean()
+    }
+
+
+# ======================
+# 10. FULL ALPHA PIPELINE
+# ======================
+def full_alpha_pipeline(df, confidence_threshold=0.6):
+    """
+    Full alpha research framework.
+
+    Step 1:
+    Generate walk-forward ML predictions.
+
+    Step 2:
+    Validate signal quality using IC.
+
+    Step 3:
+    Measure IC decay.
+
+    Step 4:
+    Build a risk-controlled long-short portfolio.
+
+    Step 5:
+    Backtest with transaction costs.
+
+    Step 6:
+    Produce fund-style performance metrics.
+    """
+
+    pred_df = walk_forward_predictions(df)
+
+    ic_df = compute_ic(pred_df)
+
+    avg_ic = ic_df["IC"].mean()
+    ic_std = ic_df["IC"].std()
+    ic_ir = avg_ic / ic_std if ic_std != 0 else np.nan
+
+    ic_decay = compute_ic_decay(pred_df)
+
+    bt_results = run_alpha_backtest(
+        pred_df,
+        confidence_threshold=confidence_threshold
+    )
+
+    bt_df = bt_results["bt_df"]
+
+    performance = compute_performance_metrics(bt_df)
+
+    return {
+        "predictions": pred_df,
+        "avg_ic": avg_ic,
+        "ic_ir": ic_ir,
+        "ic_time_series": ic_df,
+        "ic_decay": ic_decay,
+        "backtest": bt_df,
+        "performance": performance,
+        "weights_matrix": bt_results["weights_matrix"],
+        "tickers": bt_results["tickers"],
+    }
+
+
+# ======================
+# 11. EXAMPLE USAGE
+# ======================
+
+# results = full_alpha_pipeline(df, confidence_threshold=0.6)
+
+# Check signal quality:
+# print(results["avg_ic"])
+# print(results["ic_ir"])
+# print(results["ic_decay"])
+
+# Check performance:
+# print(results["performance"])
+
+# View equity curve:
+# results["backtest"][["date", "equity"]]
+
+# Plot equity curve:
+# results["backtest"].set_index("date")["equity"].plot(
+#     title="Alpha Strategy Equity Curve"
+# )
+
+results = full_alpha_pipeline(df, confidence_threshold=0.6)
+print(results["performance"])
