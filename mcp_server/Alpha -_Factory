@@ -1,0 +1,327 @@
+# For this code, we now have:
+# 1) Multi-alpha system (Random Forest+Ridge+Ensemble Prediction)
+# 2) Portfolio system (Long-short + Top K Selection)
+# 3 Risk System (Vol Targeting + Turnover Control) 
+# 4) Execition Approximation (Transaction Cost + Position Transitions) 
+# 5) Factor Control: PCA Neutralisation
+
+# Before: 1 model → fragile
+# Now: multiple models → ensemble → stable alpha
+# Now: ALPHAS (many) → WEIGHTING → RISK AGGREGATION → EXECUTION
+# Now: minimise correlation across strategies
+# Now: run multiple independent alpha streams
+
+
+import numpy as np
+import pandas as pd
+from numba import njit
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import Ridge
+from sklearn.decomposition import PCA
+from scipy.stats import spearmanr
+
+
+# ============================================================
+# CONFIG
+# ============================================================
+
+CONFIG = {
+    "initial_capital": 1_000_000,
+    "lookback": 252,
+    "horizon": 5,
+    "rebalance_freq": 5,
+    "transaction_cost": 0.00025,
+    "top_k": 5,
+    "target_vol": 0.15,
+    "max_leverage": 2.0,
+    "vol_lookback": 20,
+    "turnover_limit": 1.0,
+}
+
+
+# ============================================================
+# 1. DATA PREP
+# ============================================================
+
+def prepare_data(df):
+    df = df.sort_values(["ticker", "date"])
+    df["target_return"] = df.groupby("ticker")["return"].shift(-CONFIG["horizon"])
+    return df.dropna(subset=["target_return"])
+
+
+# ============================================================
+# 2. MULTI-ALPHA LIBRARY
+# ============================================================
+
+class AlphaLibrary:
+    """
+    Each alpha = independent signal
+
+    This mimics "pods" inside Citadel
+    """
+
+    def __init__(self):
+        self.models = {
+            "rf": RandomForestRegressor(n_estimators=200, max_depth=6),
+            "ridge": Ridge(alpha=1.0),
+        }
+
+    def fit(self, X, y):
+        for m in self.models.values():
+            m.fit(X, y)
+
+    def predict(self, X):
+        preds = {}
+
+        for name, m in self.models.items():
+            preds[name] = m.predict(X)
+
+        return preds
+
+
+# ============================================================
+# 3. ALPHA WEIGHTING (IC-BASED)
+# ============================================================
+
+def compute_alpha_ic(preds_dict, y_true):
+
+    ic_scores = {}
+
+    for name, preds in preds_dict.items():
+        ic, _ = spearmanr(preds, y_true)
+        ic_scores[name] = ic if not np.isnan(ic) else 0.0
+
+    return ic_scores
+
+
+def normalize_weights(ic_scores):
+    vals = np.array(list(ic_scores.values()))
+
+    # softmax weighting
+    exp_vals = np.exp(vals)
+    weights = exp_vals / exp_vals.sum()
+
+    return dict(zip(ic_scores.keys(), weights))
+
+
+def combine_alphas(preds_dict, weights):
+
+    combined = 0
+
+    for name, preds in preds_dict.items():
+        combined += weights[name] * preds
+
+    return combined
+
+
+# ============================================================
+# 4. PCA NEUTRALISATION (REMOVE CORRELATED RISK)
+# ============================================================
+
+def pca_neutralize(signal_matrix, n_components=1):
+    """
+    Removes dominant common factor (market beta-like)
+
+    This is key for multi-strategy funds:
+    → avoid hidden correlation risk
+    """
+
+    pca = PCA(n_components=n_components)
+    factors = pca.fit_transform(signal_matrix)
+
+    reconstructed = pca.inverse_transform(factors)
+
+    return signal_matrix - reconstructed
+
+
+# ============================================================
+# 5. WALK FORWARD
+# ============================================================
+
+def walk_forward_alpha_factory(df):
+
+    df = prepare_data(df)
+
+    dates = df["date"].unique()
+    results = []
+
+    feature_cols = [
+        col for col in df.columns
+        if col not in ["date", "ticker", "return", "target_return"]
+    ]
+
+    for i in range(CONFIG["lookback"], len(dates)):
+
+        train_dates = dates[i - CONFIG["lookback"]:i]
+        test_date = dates[i]
+
+        train_df = df[df["date"].isin(train_dates)]
+        test_df = df[df["date"] == test_date].copy()
+
+        X_train = train_df[feature_cols]
+        y_train = train_df["target_return"]
+
+        X_test = test_df[feature_cols]
+
+        # === MULTI-ALPHA TRAIN ===
+        alpha_lib = AlphaLibrary()
+        alpha_lib.fit(X_train, y_train)
+
+        preds_dict = alpha_lib.predict(X_test)
+
+        # === IC WEIGHTING ===
+        ic_scores = compute_alpha_ic(preds_dict, y_train[:len(preds_dict[list(preds_dict.keys())[0]])])
+        weights = normalize_weights(ic_scores)
+
+        combined = combine_alphas(preds_dict, weights)
+
+        # === PCA neutralisation ===
+        combined = pca_neutralize(combined.reshape(-1,1)).flatten()
+
+        test_df["prediction"] = combined
+        test_df["confidence"] = np.abs(combined)
+
+        results.append(test_df[["date","ticker","prediction","confidence","return"]])
+
+    return pd.concat(results)
+
+
+# ============================================================
+# 6. PORTFOLIO
+# ============================================================
+
+def construct_portfolio(preds):
+
+    ranked = preds.sort_values()
+
+    long_assets = ranked.tail(CONFIG["top_k"]).index
+    short_assets = ranked.head(CONFIG["top_k"]).index
+
+    weights = pd.Series(0.0, index=preds.index)
+
+    weights.loc[long_assets] = 1 / CONFIG["top_k"]
+    weights.loc[short_assets] = -1 / CONFIG["top_k"]
+
+    return weights
+
+
+# ============================================================
+# 7. RISK ENGINE
+# ============================================================
+
+def apply_vol_target(w, returns_window):
+
+    if len(returns_window) < 5:
+        return w
+
+    vol = np.std(returns_window @ w) * np.sqrt(252)
+
+    if vol == 0:
+        return w
+
+    scale = CONFIG["target_vol"] / vol
+    scale = min(scale, CONFIG["max_leverage"])
+
+    return w * scale
+
+
+def apply_turnover_control(new_w, old_w):
+
+    turnover = np.sum(np.abs(new_w - old_w))
+
+    if turnover <= CONFIG["turnover_limit"]:
+        return new_w
+
+    return old_w + (new_w - old_w) * (CONFIG["turnover_limit"] / turnover)
+
+
+# ============================================================
+# 8. BACKTEST
+# ============================================================
+
+@njit
+def run_backtest(returns, weights):
+
+    T, N = returns.shape
+    equity = CONFIG["initial_capital"]
+    equity_curve = np.zeros(T)
+
+    prev_w = np.zeros(N)
+
+    for t in range(T):
+
+        w = weights[t]
+
+        port_ret = 0.0
+        for i in range(N):
+            port_ret += w[i] * returns[t, i]
+
+        turnover = np.sum(np.abs(w - prev_w))
+        cost = turnover * CONFIG["transaction_cost"]
+
+        equity = equity * (1 + port_ret - cost)
+        equity_curve[t] = equity
+
+        prev_w = w.copy()
+
+    return equity_curve
+
+
+# ============================================================
+# 9. MASTER PIPELINE
+# ============================================================
+
+def run_citadel_alpha_factory(df):
+
+    pred_df = walk_forward_alpha_factory(df)
+
+    dates = pred_df["date"].unique()
+    tickers = pred_df["ticker"].unique()
+
+    T = len(dates)
+    N = len(tickers)
+
+    ticker_to_idx = {t: i for i, t in enumerate(tickers)}
+
+    returns_matrix = np.zeros((T, N))
+    weights_matrix = np.zeros((T, N))
+
+    for t_idx, date in enumerate(dates):
+
+        slice_df = pred_df[pred_df["date"] == date]
+
+        for _, row in slice_df.iterrows():
+            returns_matrix[t_idx, ticker_to_idx[row["ticker"]]] = row["return"]
+
+    prev_w = np.zeros(N)
+
+    for t_idx, date in enumerate(dates):
+
+        if t_idx % CONFIG["rebalance_freq"] != 0:
+            weights_matrix[t_idx] = prev_w
+            continue
+
+        slice_df = pred_df[pred_df["date"] == date]
+
+        preds = slice_df.set_index("ticker")["prediction"]
+
+        weights = construct_portfolio(preds)
+
+        w_vec = np.zeros(N)
+
+        for ticker, w in weights.items():
+            w_vec[ticker_to_idx[ticker]] = w
+
+        start = max(0, t_idx - CONFIG["vol_lookback"])
+        w_vec = apply_vol_target(w_vec, returns_matrix[start:t_idx])
+        w_vec = apply_turnover_control(w_vec, prev_w)
+
+        weights_matrix[t_idx] = w_vec
+        prev_w = w_vec.copy()
+
+    equity_curve = run_backtest(returns_matrix, weights_matrix)
+
+    return pd.DataFrame({
+        "date": dates,
+        "equity": equity_curve
+    })
