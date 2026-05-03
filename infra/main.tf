@@ -149,3 +149,38 @@ resource "google_cloud_scheduler_job" "crypto_scheduler" {
   }
   depends_on = [google_cloud_run_v2_job_iam_member.crypto_scheduler_invoker]
 }
+
+# =====================================================================
+# PIPELINE 3: MCP server 
+# =====================================================================
+resource "google_cloud_run_v2_service" "mcp_server" {
+  name     = "quant-mcp-server"
+  location = var.region
+
+  template {
+    # CRITICAL: Gen 2 provides native Linux compatibility and faster CPU for Pandas/NumPy
+    execution_environment = "EXECUTION_ENVIRONMENT_GEN2"
+    
+    containers {
+      image = "${var.region}-docker.pkg.dev/${var.project_id}/quant-repo/mcp-server:latest"
+      
+      env {
+        name  = "GCP_PROJECT_ID"
+        value = var.project_id
+      }
+      
+      resources {
+        limits = {
+          cpu    = "2"      # Backtesting needs dedicated compute
+          memory = "4Gi"    # Loading 3 years of hourly BQ data requires RAM
+        }
+      }
+    }
+    
+    # We must limit concurrency. If 10 agents hit the backtester at once, 
+    # it will OOM crash. Force Cloud Run to scale horizontally instead.
+    max_instance_request_concurrency = 4
+  }
+}
+
+# Generate a URL, but keep it locked down (do not use roles/run.invoker for allUsers)

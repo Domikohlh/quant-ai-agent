@@ -127,15 +127,7 @@ class PlustusAgentEngine:
         BQ_CLOUD_RUN_URL = os.getenv("BQ_MCP_URL", "")
         bq_client = ToolboxSyncClient(BQ_CLOUD_RUN_URL)
  
-        # Instruction for the Machine Learning specialized agent
-        ml_instruction = """
-             """
-
-       # Instruction for the Backtest specialized agent
-        backtest_instruction = """
-            """
-    
-       
+  
         system_instruction = """
             You are a professional financial quantitative researcher. Your name is 'Plutus AI'.
  
@@ -171,21 +163,15 @@ class PlustusAgentEngine:
             """
  
         # Build Agents with these dynamically authenticated toolsets
-        bq_gcp_agent = LlmAgent(
-            model=self.sub_model, name="ML_Agent",
-            instruction=ml_instruction,
-            tools=bq_client.load_toolset()
-        )
- 
-        gitlab_agent = LlmAgent(
-            model=self.sub_model, name="Backtest_Agent",
-            instruction=backtest_instruction,
-            tools =[]
-        )
+#       gitlab_agent = LlmAgent(
+#            model=self.sub_model, name="Backtest_Agent",
+#            instruction=backtest_instruction,
+#            tools =[]
+#        )
  
  
         main_agent = LlmAgent(
-            model=self.main_model, name="richemont_data_agent",
+            model=self.main_model, name="Plutus_AI",
             instruction=system_instruction,
             tools=[google_search, AgentTool(agent=bq_gcp_agent), AgentTool(agent=gitlab_agent)]
         )

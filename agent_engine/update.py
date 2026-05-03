@@ -1,7 +1,7 @@
 import vertexai
 from google.cloud import aiplatform
 from vertexai.preview import reasoning_engines
-from deployment_agent import RichemontAgentEngine
+from agent import PlutusAgentEngine
  
 # 1. Initialize Vertex AI
 aiplatform.init(
@@ -16,7 +16,7 @@ vertexai.init(
     staging_bucket=""
 )
  
-print("Updating Existing RichemontAgentEngine on Vertex AI...")
+print("Updating Existing AgentEngine on Vertex AI...")
  
 # 2. Add your EXACT existing Agent Engine ID here
 # (You should be able to find this in your Vertex AI Console or past deployment logs)
@@ -27,7 +27,7 @@ agent_engine = reasoning_engines.ReasoningEngine(EXISTING_ENGINE_ID)
  
 # 4. Use .update() instead of .create()!
 agent_engine.update(
-    reasoning_engine=RichemontAgentEngine(),
+    reasoning_engine=PlutusAgentEngine(),
     requirements=[
         "google-adk",
         "google-cloud-aiplatform[reasoningengine]",
